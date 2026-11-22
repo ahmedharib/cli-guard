@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>cli-guard — Live Security Dashboard &amp; Bitcoin OTS Ledger</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --surface: #121826;
+      --surface-2: #182135;
+      --border: #24304a;
+      --text: #e6edf7;
+      --muted: #8fa1be;
+      --accent: #38bdf8;
+      --green: #22c55e;
+      --yellow: #f59e0b;
+      --red: #ef4444;
+      --purple: #a78bfa;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans);
+      line-height: 1.5;
+    }
+    header {
+      background: linear-gradient(180deg, #121a2d 0%, #0b0f17 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 18px 28px;
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand-badge {
+      background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.4);
+      color: var(--accent); font-family: var(--mono); font-weight: 700;
+      padding: 6px 10px; border-radius: 8px; font-size: 14px;
+    }
+    .brand h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -0.01em; }
+    .brand p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+    .header-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .pill {
+      font-family: var(--mono); font-size: 12px; padding: 5px 10px; border-radius: 999px;
+      border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+    }
+    .pill.live { border-color: rgba(34, 197, 94, 0.45); color: var(--green); background: rgba(34, 197, 94, 0.1); }
+    .pill.static { border-color: rgba(167, 139, 250, 0.45); color: var(--purple); background: rgba(167, 139, 250, 0.1); }
+    button {
+      background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+      padding: 7px 13px; border-radius: 8px; font-size: 12.5px; cursor: pointer; font-weight: 500;
+    }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); color: #06131f; border-color: var(--accent); font-weight: 650; }
+    button.primary:hover { filter: brightness(1.08); color: #06131f; }
+    main { max-width: 1280px; margin: 0 auto; padding: 24px 28px 60px; }
+    .cards {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(185px, 1fr)); gap: 14px;
+      margin-bottom: 22px;
+    }
+    .card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 16px 18px;
+    }
+    .card .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+    .card .val { font-size: 28px; font-weight: 700; margin-top: 6px; font-family: var(--mono); }
+    .card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .val.red { color: var(--red); }
+    .val.yellow { color: var(--yellow); }
+    .val.green { color: var(--green); }
+    .val.accent { color: var(--accent); }
+    .val.purple { color: var(--purple); }
+    .tabs {
+      display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin-bottom: 18px;
+      flex-wrap: wrap;
+    }
+    .tab {
+      background: transparent; border: none; border-bottom: 2px solid transparent;
+      border-radius: 0; padding: 10px 14px; color: var(--muted); font-size: 13.5px;
+    }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); font-weight: 650; }
+    .panel { display: none; }
+    .panel.active { display: block; }
+    .table-wrap {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      overflow-x: auto;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { padding: 11px 14px; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; background: rgba(255,255,255,0.02); }
+    tr:last-child td { border-bottom: none; }
+    .tag {
+      display: inline-block; padding: 2px 8px; border-radius: 999px; font-family: var(--mono);
+      font-size: 11px; font-weight: 650; text-transform: uppercase;
+    }
+    .tag.malicious { background: rgba(239, 68, 68, 0.16); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.4); }
+    .tag.suspicious { background: rgba(245, 158, 11, 0.16); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.4); }
+    .tag.benign { background: rgba(34, 197, 94, 0.14); color: #86efac; border: 1px solid rgba(34, 197, 94, 0.35); }
+    .tag.demo { background: rgba(167, 139, 250, 0.16); color: #ddd6fe; border: 1px solid rgba(167, 139, 250, 0.4); }
+    .tag.confirmed { background: rgba(56, 189, 248, 0.16); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.4); }
+    .finding-card {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 18px; margin-bottom: 14px;
+    }
+    .finding-head {
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+      margin-bottom: 10px;
+    }
+    .mono { font-family: var(--mono); font-size: 12.5px; }
+    pre {
+      background: #070b12; border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px; overflow-x: auto; font-family: var(--mono); font-size: 12px; color: #cfe2ff;
+      margin: 8px 0 0;
+    }
+    .log-box {
+      background: #070b12; border: 1px solid var(--border); border-radius: 12px;
+      padding: 14px; font-family: var(--mono); font-size: 12px; max-height: 520px; overflow-y: auto;
+    }
+    .log-line { padding: 4px 0; border-bottom: 1px dashed rgba(255,255,255,0.06); }
+    .log-line .ts { color: var(--muted); margin-right: 10px; }
+    .log-line.alert { color: #fca5a5; }
+    .log-line.warning { color: #fcd34d; }
+    .log-line.error { color: #fb7185; }
+    .log-line.info { color: #cbd5e1; }
+    .check-bar {
+      display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+    }
+    .check-bar input {
+      flex: 1; min-width: 240px; background: #070b12; color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+      font-family: var(--mono); font-size: 13px;
+    }
+    .muted { color: var(--muted); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-badge">cg</div>
+      <div>
+        <h1>cli-guard Security Dashboard</h1>
+        <p>Zero-execution npm/pnpm/yarn/bun malware detection &bull; Tree-sitter AST &bull; Meta Muse Spark &bull; Bitcoin OpenTimestamps</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <span id="mode-pill" class="pill">Loading...</span>
+      <span id="seq-pill" class="pill">seq: -</span>
+      <button id="btn-upgrade-ots" onclick="upgradeOts()" style="display:none;">Upgrade Bitcoin OTS</button>
+      <button onclick="loadSnapshot()">Refresh</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="cards">
+      <div class="card">
+        <div class="label">Packages Scanned</div>
+        <div id="stat-scanned" class="val accent">0</div>
+        <div id="stat-mode-sub" class="sub">Zero code execution</div>
+      </div>
+      <div class="card">
+        <div class="label">Malicious Flagged</div>
+        <div id="stat-malicious" class="val red">0</div>
+        <div class="sub">Blocked / committed</div>
+      </div>
+      <div class="card">
+        <div class="label">Suspicious Flagged</div>
+        <div id="stat-suspicious" class="val yellow">0</div>
+        <div class="sub">Human review / agent</div>
+      </div>
+      <div class="card">
+        <div class="label">Benign Verified</div>
+        <div id="stat-benign" class="val green">0</div>
+        <div class="sub">SQLite SHA-512 cached</div>
+      </div>
+      <div class="card">
+        <div class="label">Bitcoin OTS Proofs</div>
+        <div id="stat-ots" class="val purple">0</div>
+        <div id="stat-ots-sub" class="sub">Salted SHA-256 commits</div>
+      </div>
+    </section>
+
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('findings', this)">Showcase Findings &amp; Demo</button>
+      <button class="tab" onclick="switchTab('logs', this)">Live Monitor Logs</button>
+      <button class="tab" onclick="switchTab('ledger', this)">Bitcoin OTS Ledger</button>
+      <button class="tab" onclick="switchTab('scanned', this)">All Scanned Packages</button>
+      <button class="tab" onclick="switchTab('livecheck', this)">Interactive Check</button>
+    </div>
+
+    <section id="panel-findings" class="panel active"></section>
+
+    <section id="panel-logs" class="panel">
+      <div class="log-box" id="logs-container">No monitor logs recorded yet.</div>
+    </section>
+
+    <section id="panel-ledger" class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Finding ID</th>
+              <th>Verdict</th>
+              <th>Risk</th>
+              <th>Disclosure Status</th>
+              <th>Bitcoin OTS</th>
+              <th>Salted Commitment (SHA-256)</th>
+            </tr>
+          </thead>
+          <tbody id="ledger-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="panel-scanned" class="panel">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Package</th>
+              <th>Verdict</th>
+              <th>Risk</th>
+              <th>Source</th>
+              <th>Layers</th>
+              <th>Scanned (UTC)</th>
+            </tr>
+          </thead>
+          <tbody id="scanned-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="panel-livecheck" class="panel">
+      <div class="check-bar">
+        <input id="check-input" type="text" placeholder="Enter npm spec (e.g. chalk@5.3.0 or lodash@4.17.21)" />
+        <button class="primary" onclick="runInteractiveCheck()">Run Zero-Execution Check</button>
+      </div>
+      <div id="check-result" class="muted">Run a live package scan when connected to a local `cg dashboard serve` instance.</div>
+    </section>
+  </main>
+
+  <script>
+    let IS_LIVE_API = false;
+
+    function esc(s) {
+      return String(s ?? '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    function switchTab(id, btn) {
+      document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById('panel-' + id).classList.add('active');
+    }
+
+    function renderSnapshot(data) {
+      const m = data.metrics || {};
+      document.getElementById('stat-scanned').textContent = m.total_scanned ?? 0;
+      document.getElementById('stat-malicious').textContent = m.malicious ?? 0;
+      document.getElementById('stat-suspicious').textContent = m.suspicious ?? 0;
+      document.getElementById('stat-benign').textContent = m.benign ?? 0;
+      document.getElementById('stat-ots').textContent = m.ledger_commitments ?? 0;
+      document.getElementById('stat-ots-sub').textContent =
+        `${m.ots_confirmed ?? 0} Bitcoin-confirmed / ${m.ots_pending ?? 0} pending`;
+      document.getElementById('seq-pill').textContent = `seq: ${data.last_seq || 'demo'}`;
+
+      const pill = document.getElementById('mode-pill');
+      if (IS_LIVE_API) {
+        pill.textContent = `LIVE (${data.provider || 'meta'}:${data.model || 'muse-spark-1.3'})`;
+        pill.className = 'pill live';
+        document.getElementById('btn-upgrade-ots').style.display = 'inline-block';
+      } else {
+        pill.textContent = 'HOSTED SNAPSHOT / DEMO';
+        pill.className = 'pill static';
+      }
+
+      // Render Showcase Findings & Demo
+      const findingsEl = document.getElementById('panel-findings');
+      const items = data.findings || [];
+      if (!items.length) {
+        findingsEl.innerHTML = '<div class="card muted">No flagged findings yet.</div>';
+      } else {
+        findingsEl.innerHTML = items.map(f => {
+          const rep = f.report || {};
+          const v = (rep.verdict || 'suspicious').toLowerCase();
+          const demoBadge = f.is_demo ? '<span class="tag demo">Demo Showcase</span>' : '';
+          const excerpts = ((rep.extra || {}).cited_excerpts || []).slice(0, 2);
+          const citations = ((rep.verification || {}).valid_citations || []).slice(0, 5);
+          return `
+            <div class="finding-card">
+              <div class="finding-head">
+                <div>
+                  <span class="tag ${esc(v)}">${esc(v)}</span>
+                  ${demoBadge}
+                  <strong class="mono" style="margin-left:8px;">${esc(rep.name)}@${esc(rep.version)}</strong>
+                  <span class="muted" style="margin-left:8px;">Risk ${esc(rep.risk_score)}/100</span>
+                </div>
+                <div class="mono muted">Commit: ${esc((f.commitment_sha256 || '').slice(0, 18))}...</div>
+              </div>
+              <p style="margin:6px 0 8px;">${esc(rep.summary)}</p>
+              <div class="muted mono" style="font-size:11.5px;">
+                Layers: ${esc((rep.layers_run || []).join(', '))} &bull; Detected: ${esc(f.detected_at_utc || '')}
+              </div>
+              ${citations.length ? `<div style="margin-top:10px;"><strong style="font-size:12px;">Verified Citations:</strong><ul style="margin:4px 0 0; padding-left:18px; font-size:12.5px;">${citations.map(c => `<li class="mono">${esc(c.file)}:${esc(c.start_line)}-${esc(c.end_line)} — <span style="font-family:var(--sans); color:var(--muted);">${esc(c.reason)}</span></li>`).join('')}</ul></div>` : ''}
+              ${excerpts.map(ex => `<pre>// ${esc(ex.file)}:${esc(ex.start_line)} (${esc(ex.reason)})\n${esc(ex.excerpt)}</pre>`).join('')}
+            </div>
+          `;
+        }).join('');
+      }
+
+      // Render Logs
+      const logsEl = document.getElementById('logs-container');
+      const logs = data.logs || [];
+      logsEl.innerHTML = logs.length
+        ? logs.map(l => `<div class="log-line ${esc(l.level || 'info')}"><span class="ts">${esc(l.ts_utc || '')}</span>[${esc((l.level || 'info').toUpperCase())}] ${esc(l.message || '')}</div>`).join('')
+        : '<div class="muted">No monitor logs recorded yet. Start `cg monitor start` to stream live events.</div>';
+
+      // Render Ledger
+      const ledgerBody = document.getElementById('ledger-body');
+      const ledger = data.ledger || [];
+      ledgerBody.innerHTML = ledger.length
+        ? ledger.map(e => {
+            const btc = e.bitcoin_block_height
+              ? `<span class="tag confirmed">Block #${esc(e.bitcoin_block_height)}</span>`
+              : `<span class="tag">${esc(e.ots_status || 'pending')}</span>`;
+            const revealedPkg = e.name ? `<div class="muted mono">${esc(e.name)}@${esc(e.version)}</div>` : '';
+            return `<tr>
+              <td class="mono">${esc(e.finding_id)}${revealedPkg}</td>
+              <td><span class="tag ${esc(e.verdict)}">${esc(e.verdict)}</span></td>
+              <td class="mono">${esc(e.risk_score)}</td>
+              <td class="mono">${esc(e.status || 'committed')}</td>
+              <td>${btc}</td>
+              <td class="mono">${esc((e.commitment_sha256 || '').slice(0, 26))}...</td>
+            </tr>`;
+          }).join('')
+        : '<tr><td colspan="6" class="muted">No public ledger commitments recorded yet.</td></tr>';
+
+      // Render Scanned Packages
+      const scannedBody = document.getElementById('scanned-body');
+      const scanned = data.scanned_packages || [];
+      scannedBody.innerHTML = scanned.length
+        ? scanned.map(r => `<tr>
+            <td class="mono">${esc(r.name)}@${esc(r.version)}</td>
+            <td><span class="tag ${esc(r.verdict)}">${esc(r.verdict)}</span></td>
+            <td class="mono">${esc(r.risk_score)}</td>
+            <td class="mono">${esc(r.scan_source)}</td>
+            <td class="mono muted">${esc((r.layers_run || []).join(', '))}</td>
+            <td class="mono muted">${esc(r.scanned_at)}</td>
+          </tr>`).join('')
+        : '<tr><td colspan="6" class="muted">No scanned packages recorded yet.</td></tr>';
+    }
+
+    async function loadSnapshot() {
+      try {
+        const resp = await fetch('/api/snapshot', { cache: 'no-store' });
+        if (resp.ok) {
+          IS_LIVE_API = true;
+          renderSnapshot(await resp.json());
+          return;
+        }
+      } catch (_) {}
+
+      try {
+        const resp = await fetch('./snapshot.json', { cache: 'no-store' });
+        if (resp.ok) {
+          IS_LIVE_API = false;
+          renderSnapshot(await resp.json());
+        }
+      } catch (err) {
+        document.getElementById('panel-findings').innerHTML =
+          `<div class="card muted">Failed loading snapshot: ${esc(err)}</div>`;
+      }
+    }
+
+    async function runInteractiveCheck() {
+      const spec = document.getElementById('check-input').value.trim();
+      const out = document.getElementById('check-result');
+      if (!spec) return;
+      if (!IS_LIVE_API) {
+        out.innerHTML = '<div class="card muted">Interactive checks require running locally via `cg dashboard serve`. On GitHub Pages this dashboard runs in static showcase mode.</div>';
+        return;
+      }
+      out.innerHTML = `<div class="card mono">Scanning ${esc(spec)} in memory (zero code execution)...</div>`;
+      try {
+        const resp = await fetch('/api/check', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ package: spec }),
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+          out.innerHTML = `<div class="card" style="color:var(--red);">Error: ${esc(data.error || resp.statusText)}</div>`;
+          return;
+        }
+        out.innerHTML = `<div class="finding-card">
+          <div class="finding-head">
+            <div><span class="tag ${esc(data.verdict)}">${esc(data.verdict)}</span>
+            <strong class="mono" style="margin-left:8px;">${esc(data.name)}@${esc(data.version)}</strong></div>
+            <span class="mono muted">Risk ${esc(data.risk_score)}/100</span>
+          </div>
+          <p>${esc(data.summary)}</p>
+          <pre>${esc(JSON.stringify(data, null, 2).slice(0, 4000))}</pre>
+        </div>`;
+        loadSnapshot();
+      } catch (err) {
+        out.innerHTML = `<div class="card" style="color:var(--red);">Request failed: ${esc(err)}</div>`;
+      }
+    }
+
+    async function upgradeOts() {
+      if (!IS_LIVE_API) return;
+      await fetch('/api/ots/upgrade', { method: 'POST' });
+      loadSnapshot();
+    }
+
+    loadSnapshot();
+    setInterval(() => { if (IS_LIVE_API) loadSnapshot(); }, 6000);
+  </script>
+</body>
+</html>

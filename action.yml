@@ -1,0 +1,154 @@
+name: "cli-guard Supply Chain Security Action"
+description: "Zero-execution npm/pnpm/yarn/bun malware scanner with Bitcoin OpenTimestamps ledger sync and automated OpenSSF PR reporting."
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  mode:
+    description: "Action mode: `audit` (scan lockfiles), `check` (scan a single package spec), or `monitor-batch` (poll one live npm batch)."
+    required: false
+    default: "audit"
+  path:
+    description: "Directory or lockfile path for `audit` mode."
+    required: false
+    default: "."
+  package:
+    description: "Package spec for `check` mode (e.g. `lodash@4.17.21`)."
+    required: false
+    default: ""
+  batch-limit:
+    description: "Max npm _changes entries per run in `monitor-batch` mode."
+    required: false
+    default: "50"
+  min-llm-risk:
+    description: "Risk threshold (0-100) before calling LLM in `monitor-batch` mode."
+    required: false
+    default: "40"
+  llm-provider:
+    description: "Pluggable LLM provider preset: meta | openai | anthropic | gemini | ollama | custom."
+    required: false
+    default: "meta"
+  llm-model:
+    description: "Optional model ID override (default muse-spark-1.3 for Meta)."
+    required: false
+    default: ""
+  model-api-key:
+    description: "API key for the configured LLM provider (optional; Layer 0+1 work without a key)."
+    required: false
+    default: ""
+  github-token:
+    description: "GitHub PAT with repo permissions for pushing to `cli-guard-ledger` and/or opening OpenSSF PRs."
+    required: false
+    default: ""
+  ledger-repo:
+    description: "Public GitHub repository for salted SHA-256 commitments and Bitcoin .ots proofs (e.g. `owner/cli-guard-ledger`)."
+    required: false
+    default: ""
+  auto-push-ledger:
+    description: "Automatically push public salted commitments and .ots proofs to `ledger-repo`."
+    required: false
+    default: "true"
+  openssf-repo:
+    description: "Upstream OpenSSF malicious-packages repository."
+    required: false
+    default: "ossf/malicious-packages"
+  openssf-fork:
+    description: "Optional fork repository (`owner/malicious-packages`) used to create PR branches."
+    required: false
+    default: ""
+  auto-openssf-pr:
+    description: "Automatically open a Pull Request to `openssf-repo` when confirmed MALICIOUS packages are found."
+    required: false
+    default: "true"
+  stamp-bitcoin:
+    description: "Stamp salted findings into Bitcoin via OpenTimestamps."
+    required: false
+    default: "true"
+  export-dashboard-dir:
+    description: "Optional output directory to export updated static web dashboard (`index.html` + `snapshot.json`)."
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+
+    - name: Install cli-guard
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install "${{ github.action_path }}"
+
+    - name: Execute cli-guard
+      shell: bash
+      env:
+        CG_LLM_PROVIDER: ${{ inputs.llm-provider }}
+        CG_MODEL: ${{ inputs.llm-model }}
+        MODEL_API_KEY: ${{ inputs.model-api-key }}
+        CG_LLM_API_KEY: ${{ inputs.model-api-key }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        CG_LEDGER_REPO: ${{ inputs.ledger-repo }}
+        CG_AUTO_PUSH_LEDGER: ${{ inputs.auto-push-ledger }}
+        CG_OPENSSF_REPO: ${{ inputs.openssf-repo }}
+        CG_OPENSSF_FORK: ${{ inputs.openssf-fork }}
+        CG_AUTO_OPENSSF_PR: ${{ inputs.auto-openssf-pr }}
+      run: |
+        set -euo pipefail
+        MODE="${{ inputs.mode }}"
+
+        if [ "$MODE" = "audit" ]; then
+          cg audit "${{ inputs.path }}"
+        elif [ "$MODE" = "check" ]; then
+          if [ -z "${{ inputs.package }}" ]; then
+            echo "::error::`package` input is required when mode=check"
+            exit 2
+          fi
+          EXTRA_FLAGS=""
+          if [ "${{ inputs.stamp-bitcoin }}" = "true" ]; then
+            EXTRA_FLAGS="--stamp-bitcoin"
+          fi
+          set +e
+          cg check "${{ inputs.package }}" $EXTRA_FLAGS --verbose
+          RC=$?
+          set -e
+          # Push salted commitments & open OpenSSF PRs if configured
+          if [ "${{ inputs.auto-push-ledger }}" = "true" ] && [ -n "${{ inputs.ledger-repo }}" ] && [ -n "${{ inputs.github-token }}" ]; then
+            cg ledger upgrade || true
+            cg ledger push --repo "${{ inputs.ledger-repo }}" || true
+          fi
+          if [ "$RC" -eq 1 ] && [ "${{ inputs.auto-openssf-pr }}" = "true" ] && [ -n "${{ inputs.github-token }}" ]; then
+            LATEST_ID=$(python -c "from cli_guard.config import Settings; from cli_guard.ledger.store import FindingsLedgerStore; entries = FindingsLedgerStore(Settings.from_env().data_dir).list_ledger_entries(); print(entries[-1]['finding_id'] if entries else '')")
+            if [ -n "$LATEST_ID" ]; then
+              cg ledger submit-openssf "$LATEST_ID" --repo "${{ inputs.openssf-repo }}" || true
+            fi
+          fi
+          exit $RC
+        elif [ "$MODE" = "monitor-batch" ]; then
+          FLAGS="--once --batch-limit ${{ inputs.batch-limit }} --min-llm-risk ${{ inputs.min-llm-risk }}"
+          if [ "${{ inputs.stamp-bitcoin }}" != "true" ]; then
+            FLAGS="$FLAGS --no-bitcoin"
+          fi
+          if [ "${{ inputs.auto-push-ledger }}" = "true" ] && [ -n "${{ inputs.ledger-repo }}" ]; then
+            FLAGS="$FLAGS --auto-push-ledger --ledger-repo ${{ inputs.ledger-repo }}"
+          fi
+          if [ "${{ inputs.auto-openssf-pr }}" = "true" ]; then
+            FLAGS="$FLAGS --auto-openssf-pr --openssf-repo ${{ inputs.openssf-repo }}"
+          fi
+          cg monitor start $FLAGS
+          cg ledger upgrade || true
+          if [ "${{ inputs.auto-push-ledger }}" = "true" ] && [ -n "${{ inputs.ledger-repo }}" ] && [ -n "${{ inputs.github-token }}" ]; then
+            cg ledger push --repo "${{ inputs.ledger-repo }}" || true
+          fi
+        else
+          echo "::error::Unsupported mode '$MODE' (expected audit, check, or monitor-batch)"
+          exit 2
+        fi
+
+        if [ -n "${{ inputs.export-dashboard-dir }}" ]; then
+          cg dashboard export --out "${{ inputs.export-dashboard-dir }}"
+        fi
