@@ -847,7 +847,7 @@
           <button class="nav-btn" data-view="runner" onclick="switchView('runner', this)">CLI Runner</button>
           <button class="nav-btn" data-view="ledger" onclick="switchView('ledger', this)">Audit Ledger</button>
           <button class="nav-btn" data-view="packages" onclick="switchView('packages', this)">Packages</button>
-          <button class="nav-btn" data-view="logs" onclick="switchView('logs', this)">Monitor Logs</button>
+          <button class="nav-btn" data-view="logs" onclick="switchView('logs', this)">Monitor Proof</button>
         </nav>
       </div>
       <div class="nav-right">
@@ -860,7 +860,7 @@
     <div class="hero-row">
       <div>
         <h1 class="hero-title">Security Findings &amp; Forensic Triage</h1>
-        <p class="hero-sub">Zero-execution AST diff analysis for npm, pnpm, yarn, and bun artifacts.</p>
+        <p class="hero-sub">Public threat-intel proof from operator monitor captures &amp; zero-execution AST diff analysis.</p>
       </div>
       <div class="hero-meta">
         <span>Engine: <strong>Tree-sitter AST</strong></span>
@@ -909,7 +909,7 @@
       <div class="section-head">
         <div>
           <h2 class="section-title">Verified Inspection Reports</h2>
-          <p class="section-sub">Cryptographic attestation, preserved code excerpts, and AST reachability triage.</p>
+          <p class="section-sub">Read-only public proof from operator monitor captures: cryptographic attestation, preserved excerpts, and AST triage.</p>
         </div>
         <div class="filter-group">
           <span class="filter-label">Filter:</span>
@@ -928,8 +928,8 @@
       <div id="inline-scanner" class="scanner-card">
         <div class="scanner-head">
           <div>
-            <h2 class="section-title">Live Package Scanner</h2>
-            <p class="section-sub">Executes pure Tree-sitter AST diffing without executing package code.</p>
+            <h2 class="section-title">On-Demand Package Runner</h2>
+            <p class="section-sub">End-user `cg check` tool: runs zero-execution Tree-sitter AST diffing and triage on a single npm spec.</p>
           </div>
           <div class="scanner-daemon">
             <span id="daemon-dot" class="dot muted"></span>
@@ -959,7 +959,7 @@
             <span id="term-status" class="ready">STATIC SNAPSHOT</span>
           </div>
           <div id="term-output" class="terminal-body">&gt; Static AST parser ready. Zero binary code execution mode active.
-&gt; Enter a package spec above and click Run Check (connects to local `cg dashboard serve` daemon).</div>
+&gt; Enter a package spec above and click Run Check (uses the public API or your local `cg dashboard serve`).</div>
         </div>
       </div>
     </section>
@@ -969,7 +969,7 @@
       <div class="section-head">
         <div>
           <h2 class="section-title">Bitcoin OpenTimestamps Audit Ledger</h2>
-          <p class="section-sub">Salted SHA-256 commitments proving early malware discovery prior to public advisories.</p>
+          <p class="section-sub">Read-only public proof of salted SHA-256 commitments recorded by operator monitor runs prior to public advisories.</p>
         </div>
         <div class="filter-group">
           <button id="btn-upgrade-ots" class="filter-btn" style="display:none;" onclick="upgradeOts()">Upgrade Pending OTS</button>
@@ -998,7 +998,7 @@
       <div class="section-head">
         <div>
           <h2 class="section-title">Scanned Package History</h2>
-          <p class="section-sub">Every npm/pnpm/yarn/bun package evaluated across guard, CLI checks, and live monitoring.</p>
+          <p class="section-sub">Read-only archive of packages captured across operator monitoring and verified showcase runs.</p>
         </div>
         <div class="filter-group">
           <button class="filter-btn" onclick="loadSnapshot()">Refresh</button>
@@ -1021,12 +1021,12 @@
       </div>
     </section>
 
-    <!-- View: Monitor Logs -->
+    <!-- View: Operator Monitor Proof Logs -->
     <section id="view-logs" class="view">
       <div class="section-head">
         <div>
-          <h2 class="section-title">Live Monitor Event Logs</h2>
-          <p class="section-sub">Streamed from `~/.cli-guard/logs/monitor.jsonl` during `cg monitor start`.</p>
+          <h2 class="section-title">Operator Monitor Proof Logs</h2>
+          <p class="section-sub">Read-only telemetry recorded by operator <code>cg monitor start</code> infrastructure as public proof (not an interactive web scanner).</p>
         </div>
         <div class="filter-group">
           <button class="filter-btn" onclick="loadSnapshot()">Refresh Logs</button>
@@ -1366,7 +1366,7 @@
               <span class="log-msg">${esc(l.message)}</span>
             </div>`;
           }).join('')
-        : '<div class="muted">No monitor logs yet. Start <code>cg monitor start</code> to stream live npm events.</div>';
+        : '<div class="muted">No operator monitor logs recorded in this public proof snapshot yet.</div>';
     }
 
     function switchView(viewName, btn) {

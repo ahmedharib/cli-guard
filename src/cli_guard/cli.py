@@ -66,7 +66,7 @@ app = typer.Typer(
 )
 guard_app = typer.Typer(help="Install Guard shims for npm, npx, pnpm, yarn, bun, and bunx.")
 cache_app = typer.Typer(help="Manage local SQLite verdict cache and allowlist.")
-monitor_app = typer.Typer(help="Live npm registry monitor and retrospective ground-truth verifier.")
+monitor_app = typer.Typer(help="Operator/research npm feed monitor and retrospective ground-truth proof verifier.")
 ledger_app = typer.Typer(help="Salted commit-reveal findings ledger, Bitcoin OpenTimestamps, and OpenSSF PRs.")
 dashboard_app = typer.Typer(help="Live web dashboard server and GitHub Pages static exporter.")
 config_app = typer.Typer(help="View or configure open-source model / API provider settings.")

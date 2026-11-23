@@ -78,9 +78,9 @@ Copy-Item .env.example .env
 
 ---
 
-## Live npm Monitor, Bitcoin OpenTimestamps Ledger & OpenSSF PRs
+## Operator npm Monitor, Bitcoin OpenTimestamps Ledger & OpenSSF PRs
 
-`cg monitor` polls `https://replicate.npmjs.com/registry/_changes` (compliant with npm's May 2025 replication API), scans every new publish with Layer 0 + Layer 1, gates LLM escalations by `--min-llm-risk` and `--max-llm-rpm`, preserves cited code excerpts locally before npm deletes malicious tarballs, stamps salted SHA-256 commitments into Bitcoin via **OpenTimestamps**, **automatically upgrades pending `.ots` proofs** on schedule, optionally pushes public commitments to your **`cli-guard-ledger`** GitHub repo, and can automatically open Pull Requests to **`ossf/malicious-packages`**.
+`cg monitor` is **operator and research infrastructure** (not an end-user web tool): it polls `https://replicate.npmjs.com/registry/_changes` (compliant with npm's May 2025 replication API), scans newly published releases with Layer 0 + Layer 1, gates LLM escalations by `--min-llm-risk` and `--max-llm-rpm`, preserves cited code excerpts locally before npm deletes malicious tarballs, stamps salted SHA-256 commitments into Bitcoin via **OpenTimestamps**, **automatically upgrades pending `.ots` proofs** on schedule, pushes public commitments to your **`cli-guard-ledger`** GitHub repo, and powers the **read-only public proof** views on the showcase site. Only verified `malicious` findings submit Pull Requests to **`ossf/malicious-packages`**.
 
 ```powershell
 # Single-batch smoke test

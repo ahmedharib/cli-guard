@@ -3,7 +3,7 @@
   "public_safe": true,
   "repo_url": "",
   "public_api_url": "https://cli-guard.onrender.com",
-  "ledger_repo": "",
+  "ledger_repo": "ahmedharib/cli-guard-ledger",
   "generated_at_utc": "2026-11-23T21:22:30.160896+00:00",
   "provider": "meta",
   "model": "muse-spark-1.3",

@@ -51,7 +51,7 @@ jobs:
           CG_LLM_PROVIDER: ${{ vars.CG_LLM_PROVIDER || 'meta' }}
           MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.CG_GITHUB_TOKEN }}
-          CG_LEDGER_REPO: ${{ vars.CG_LEDGER_REPO }}
+          CG_LEDGER_REPO: ${{ vars.CG_LEDGER_REPO || 'ahmedharib/cli-guard-ledger' }}
           CG_OPENSSF_REPO: ${{ vars.CG_OPENSSF_REPO || 'ossf/malicious-packages' }}
           CG_AUTO_PUSH_LEDGER: ${{ vars.CG_AUTO_PUSH_LEDGER || 'false' }}
           CG_AUTO_OPENSSF_PR: ${{ vars.CG_AUTO_OPENSSF_PR || 'false' }}
