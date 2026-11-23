@@ -9,12 +9,19 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+def _safe_home() -> Path:
+    try:
+        return Path.home().resolve()
+    except RuntimeError:
+        return Path.cwd().resolve()
+
+
 def default_data_dir() -> Path:
     """Return user-scoped data directory for cache, shims, and advisories."""
     override = os.environ.get("CG_HOME")
     if override:
         return Path(override).expanduser().resolve()
-    return (Path.home() / ".cli-guard").resolve()
+    return (_safe_home() / ".cli-guard").resolve()
 
 
 @dataclass(slots=True)
@@ -67,6 +74,46 @@ PROVIDER_PRESETS: dict[str, ProviderPreset] = {
         api_key_envs=("OLLAMA_API_KEY",),
         default_triage_model="qwen2.5-coder:7b",
         default_investigator_model="qwen2.5-coder:32b",
+    ),
+    "llamacpp": ProviderPreset(
+        name="llamacpp",
+        kind="openai_compat",
+        base_url="http://localhost:8080/v1",
+        api_key_envs=("LLAMACPP_API_KEY",),
+        default_triage_model="local-model",
+        default_investigator_model="local-model",
+    ),
+    "openrouter": ProviderPreset(
+        name="openrouter",
+        kind="openai_compat",
+        base_url="https://openrouter.ai/api/v1",
+        api_key_envs=("OPENROUTER_API_KEY",),
+        default_triage_model="qwen/qwen-2.5-coder-32b-instruct:free",
+        default_investigator_model="qwen/qwen-2.5-coder-32b-instruct:free",
+    ),
+    "groq": ProviderPreset(
+        name="groq",
+        kind="openai_compat",
+        base_url="https://api.groq.com/openai/v1",
+        api_key_envs=("GROQ_API_KEY",),
+        default_triage_model="llama-3.3-70b-versatile",
+        default_investigator_model="llama-3.3-70b-versatile",
+    ),
+    "together": ProviderPreset(
+        name="together",
+        kind="openai_compat",
+        base_url="https://api.together.xyz/v1",
+        api_key_envs=("TOGETHER_API_KEY",),
+        default_triage_model="Qwen/Qwen2.5-Coder-32B-Instruct",
+        default_investigator_model="Qwen/Qwen2.5-Coder-32B-Instruct",
+    ),
+    "static": ProviderPreset(
+        name="static",
+        kind="none",
+        base_url="",
+        api_key_envs=(),
+        default_triage_model="",
+        default_investigator_model="",
     ),
     "custom": ProviderPreset(
         name="custom",
@@ -154,10 +201,17 @@ class Settings:
         base_url: str | None = None,
         env_file: Path | None = None,
     ) -> Settings:
-        if env_file and env_file.exists():
-            load_dotenv(env_file, override=False)
-        else:
-            load_dotenv(override=False)
+        data_dir = default_data_dir()
+        for candidate in (
+            [env_file]
+            if env_file is not None
+            else [Path.cwd() / ".env", data_dir / ".env"]
+        ):
+            try:
+                if candidate.is_file():
+                    load_dotenv(candidate, override=False)
+            except OSError:
+                pass
 
         chosen_provider = (
             provider or os.environ.get("CG_LLM_PROVIDER", "meta")
@@ -191,7 +245,7 @@ class Settings:
         ).strip() or None
 
         return cls(
-            data_dir=default_data_dir(),
+            data_dir=data_dir,
             llm_provider=chosen_provider,
             llm_base_url=base_url or os.environ.get("CG_LLM_BASE_URL") or None,
             llm_api_key=os.environ.get("CG_LLM_API_KEY") or None,
@@ -209,3 +263,56 @@ class Settings:
             auto_push_ledger=os.environ.get("CG_AUTO_PUSH_LEDGER", "false").lower() in {"1", "true", "yes"},
             auto_openssf_pr=os.environ.get("CG_AUTO_OPENSSF_PR", "false").lower() in {"1", "true", "yes"},
         )
+
+
+def write_user_env_config(
+    data_dir: Path,
+    *,
+    provider: str,
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> Path:
+    """Persist user-chosen open-source model or API backend to `~/.cli-guard/.env`."""
+    data_dir.mkdir(parents=True, exist_ok=True)
+    env_path = data_dir / ".env"
+
+    existing: dict[str, str] = {}
+    if env_path.is_file():
+        for raw_line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            existing[k.strip()] = v.strip()
+
+    norm_provider = provider.strip().lower()
+    existing["CG_LLM_PROVIDER"] = norm_provider
+    if model:
+        existing["CG_TRIAGE_MODEL"] = model.strip()
+        existing["CG_INVESTIGATOR_MODEL"] = model.strip()
+    elif norm_provider in PROVIDER_PRESETS:
+        preset = PROVIDER_PRESETS[norm_provider]
+        if preset.default_triage_model:
+            existing["CG_TRIAGE_MODEL"] = preset.default_triage_model
+            existing["CG_INVESTIGATOR_MODEL"] = preset.default_investigator_model
+        else:
+            existing.pop("CG_TRIAGE_MODEL", None)
+            existing.pop("CG_INVESTIGATOR_MODEL", None)
+
+    if base_url:
+        existing["CG_LLM_BASE_URL"] = base_url.strip().rstrip("/")
+    elif norm_provider != "custom":
+        existing.pop("CG_LLM_BASE_URL", None)
+
+    if api_key is not None and api_key.strip():
+        preset = PROVIDER_PRESETS.get(norm_provider, PROVIDER_PRESETS["custom"])
+        key_env = preset.api_key_envs[0] if preset.api_key_envs else "CG_LLM_API_KEY"
+        existing[key_env] = api_key.strip()
+
+    lines = [
+        "# cli-guard user configuration (generated by `cg config set` / `cg guard setup`)",
+        *(f"{k}={v}" for k, v in existing.items()),
+    ]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return env_path

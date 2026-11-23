@@ -47,17 +47,33 @@ Copy-Item .env.example .env
 
 ---
 
-## Install Guard (`npm`, `npx`, `pnpm`, `yarn`, `bun`, `bunx`)
+## Install Guard, Open-Source / API Setup & AI Agents
 
 ```powershell
 # Install Windows .cmd (works even under Restricted PowerShell ExecutionPolicy) / POSIX shims
 .\.venv\Scripts\cg.exe guard setup
+
+# Plug in an open-source local model, free open-weight API, paid API, or static-only mode:
+.\.venv\Scripts\cg.exe config set --provider ollama --model qwen2.5-coder:7b
+.\.venv\Scripts\cg.exe config set --provider llamacpp --base-url http://localhost:8080/v1
+.\.venv\Scripts\cg.exe config set --provider openrouter --api-key sk-or-...
+.\.venv\Scripts\cg.exe config set --provider static
+# Or configure interactively while installing shims:
+.\.venv\Scripts\cg.exe guard setup --configure
 
 # Safely verify guard blocking using a harmless synthetic local canary
 .\.venv\Scripts\cg.exe guard selftest
 
 # Open a guarded shell (shims placed first on PATH)
 .\.venv\Scripts\cg.exe guard shell
+
+# Security-audit currently installed packages (no lockfile required)
+.\.venv\Scripts\cg.exe audit --installed .
+.\.venv\Scripts\cg.exe audit --global
+
+# AI Agent Integration (MCP stdio server for Claude Code, Cursor, Antigravity, Codex)
+.\.venv\Scripts\cg.exe agent setup
+.\.venv\Scripts\cg.exe mcp
 ```
 
 ---
@@ -160,9 +176,17 @@ Use `cli-guard` in CI to audit lockfiles, push salted commitments to `cli-guard-
 ## Switching LLM Providers
 
 ```powershell
+# Open-source / local (no paid API key required)
+cg check some-pkg --provider ollama --model qwen2.5-coder:7b
+cg check some-pkg --provider llamacpp --base-url http://localhost:8080/v1
+cg check some-pkg --provider static   # Layer 0 + Layer 1 AST/diff only
+
+# Cloud APIs (open-weight & frontier)
 cg check some-pkg --provider meta --model muse-spark-1.3
+cg check some-pkg --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct:free
+cg check some-pkg --provider groq --model llama-3.3-70b-versatile
+cg check some-pkg --provider together --model Qwen/Qwen2.5-Coder-32B-Instruct
 cg check some-pkg --provider openai --model gpt-4o-mini
 cg check some-pkg --provider anthropic --model claude-3-5-haiku-latest
 cg check some-pkg --provider gemini --model gemini-2.5-flash
-cg check some-pkg --provider ollama --model qwen2.5-coder:7b
 ```

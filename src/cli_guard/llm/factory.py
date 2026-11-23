@@ -10,12 +10,15 @@ from cli_guard.llm.openai_compat import OpenAICompatProvider
 
 
 def create_provider(settings: Settings) -> LLMProvider | None:
-    """Create the configured LLM provider, or return None if credentials are not configured."""
+    """Create the configured LLM provider, or return None if static-only or credentials are missing."""
     preset = settings.resolved_preset
+    if preset.kind == "none" or settings.llm_provider.lower().strip() in {"none", "static"}:
+        return None
+
     api_key = settings.effective_api_key
 
-    # Local Ollama / custom endpoints may not require an API key
-    requires_key = preset.name not in {"ollama", "custom"}
+    # Local open-source servers (Ollama, llama.cpp, custom) do not require an API key
+    requires_key = preset.name not in {"ollama", "llamacpp", "custom"}
     if requires_key and not api_key:
         return None
 

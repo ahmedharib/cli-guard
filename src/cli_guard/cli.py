@@ -22,7 +22,8 @@ from rich.panel import Panel
 from rich.table import Table
 
 from cli_guard import __version__
-from cli_guard.config import PROVIDER_PRESETS, Settings
+from cli_guard.agent.mcp_server import build_agent_mcp_config, serve_mcp_stdio
+from cli_guard.config import PROVIDER_PRESETS, Settings, write_user_env_config
 from cli_guard.core.advisories import AdvisoryClient
 from cli_guard.core.cache import VerdictCache
 from cli_guard.core.pipeline import SecurityPipeline
@@ -32,6 +33,10 @@ from cli_guard.dashboard.server import (
     export_static_dashboard,
 )
 from cli_guard.ecosystems.npm.command_parser import parse_package_manager_command
+from cli_guard.ecosystems.npm.installed import (
+    scan_global_npm_packages,
+    scan_installed_node_modules,
+)
 from cli_guard.ecosystems.npm.lockfile import discover_and_parse_lockfiles
 from cli_guard.ecosystems.npm.npmrc import NpmrcConfig
 from cli_guard.ecosystems.npm.registry import RegistryError
@@ -64,11 +69,15 @@ cache_app = typer.Typer(help="Manage local SQLite verdict cache and allowlist.")
 monitor_app = typer.Typer(help="Live npm registry monitor and retrospective ground-truth verifier.")
 ledger_app = typer.Typer(help="Salted commit-reveal findings ledger, Bitcoin OpenTimestamps, and OpenSSF PRs.")
 dashboard_app = typer.Typer(help="Live web dashboard server and GitHub Pages static exporter.")
+config_app = typer.Typer(help="View or configure open-source model / API provider settings.")
+agent_app = typer.Typer(help="AI coding agent integration (MCP server & instruction snippets).")
 app.add_typer(guard_app, name="guard")
 app.add_typer(cache_app, name="cache")
 app.add_typer(monitor_app, name="monitor")
 app.add_typer(ledger_app, name="ledger")
 app.add_typer(dashboard_app, name="dashboard")
+app.add_typer(config_app, name="config")
+app.add_typer(agent_app, name="agent")
 
 console = Console()
 err_console = Console(stderr=True)
@@ -207,24 +216,33 @@ def cmd_version() -> None:
     console.print(f"cli-guard (`cg`) v{__version__}")
 
 
-@app.command("config")
+@config_app.callback(invoke_without_command=True)
 def cmd_config(
+    ctx: typer.Context,
     provider: Annotated[str | None, typer.Option("--provider", "-p")] = None,
     env_file: Annotated[Path | None, typer.Option("--env-file")] = None,
 ) -> None:
     """Display active LLM provider, models, guard policy, and supported presets."""
+    if ctx.invoked_subcommand is not None:
+        return
     settings = Settings.from_env(provider=provider, env_file=env_file)
     table = Table(title="cli-guard Configuration")
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
     table.add_row("Data dir", str(settings.data_dir))
+    table.add_row("User .env", str(settings.data_dir / ".env"))
     table.add_row("Shims dir", str(settings.shims_dir))
     table.add_row("Cache DB", str(settings.cache_db_path))
     table.add_row("LLM Provider", settings.llm_provider)
-    table.add_row("LLM Base URL", settings.effective_base_url)
-    table.add_row("Triage Model", settings.effective_triage_model)
-    table.add_row("Investigator Model", settings.effective_investigator_model)
-    table.add_row("API Key Configured", "yes" if settings.effective_api_key else "no (static-only mode)")
+    table.add_row("LLM Base URL", settings.effective_base_url or "none (static-only)")
+    table.add_row("Triage Model", settings.effective_triage_model or "none")
+    table.add_row("Investigator Model", settings.effective_investigator_model or "none")
+    table.add_row(
+        "LLM Mode",
+        "static-only"
+        if settings.resolved_preset.kind == "none"
+        else ("local/open-source" if settings.llm_provider in {"ollama", "llamacpp"} else ("API key set" if settings.effective_api_key else "no key (static-only fallback)")),
+    )
     table.add_row("Cooldown Hours", str(settings.cooldown_hours))
     table.add_row("Available Presets", ", ".join(sorted(PROVIDER_PRESETS.keys())))
     npmrc = NpmrcConfig.load()
@@ -237,6 +255,58 @@ def cmd_config(
     table.add_row("OpenSSF Target Repo", settings.openssf_repo)
     table.add_row("Auto OTS Upgrade (s)", str(int(settings.ots_upgrade_interval_seconds)))
     console.print(table)
+
+
+@config_app.command("set")
+def cmd_config_set(
+    provider: Annotated[str | None, typer.Option("--provider", "-p", help="Provider preset: ollama | llamacpp | openrouter | groq | together | meta | openai | anthropic | gemini | custom | static")] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model ID (e.g. qwen2.5-coder:7b, muse-spark-1.3)")] = None,
+    base_url: Annotated[str | None, typer.Option("--base-url", help="Custom OpenAI-compatible base URL")] = None,
+    api_key: Annotated[str | None, typer.Option("--api-key", help="API key (for cloud API providers; not needed for ollama/llamacpp/static)")] = None,
+    interactive: Annotated[bool, typer.Option("--interactive", "-i", help="Prompt interactively to plug in a local open-source model or API")] = False,
+) -> None:
+    """Configure an open-source model (Ollama/llama.cpp) or API backend in `~/.cli-guard/.env`."""
+    settings = Settings.from_env()
+    chosen_provider = provider
+    chosen_model = model
+    chosen_base = base_url
+    chosen_key = api_key
+
+    if interactive or not chosen_provider:
+        presets_str = ", ".join(sorted(PROVIDER_PRESETS.keys()))
+        chosen_provider = typer.prompt(
+            f"Choose LLM provider ({presets_str})",
+            default=settings.llm_provider or "static",
+        ).strip().lower()
+        preset = PROVIDER_PRESETS.get(chosen_provider, PROVIDER_PRESETS["custom"])
+        if preset.kind != "none":
+            chosen_model = typer.prompt(
+                "Model ID",
+                default=chosen_model or preset.default_triage_model,
+            ).strip()
+            if chosen_provider == "custom":
+                chosen_base = typer.prompt(
+                    "OpenAI-compatible base URL",
+                    default=chosen_base or preset.base_url,
+                ).strip()
+            if chosen_provider not in {"ollama", "llamacpp"} and not chosen_key:
+                entered = typer.prompt(
+                    f"API key for {chosen_provider} (leave blank to configure later)",
+                    default="",
+                    hide_input=True,
+                ).strip()
+                if entered:
+                    chosen_key = entered
+
+    assert chosen_provider is not None
+    env_path = write_user_env_config(
+        settings.data_dir,
+        provider=chosen_provider,
+        model=chosen_model,
+        base_url=chosen_base,
+        api_key=chosen_key,
+    )
+    console.print(f"[green]Saved configuration to[/green] {env_path} (provider={chosen_provider}).")
 
 
 @app.command("check")
@@ -342,10 +412,95 @@ def cmd_investigate(
 @app.command("audit")
 def cmd_audit(
     path: Annotated[Path, typer.Argument(help="Project directory or lockfile path")] = Path("."),
+    installed: Annotated[bool, typer.Option("--installed", help="Security-audit installed packages in `node_modules/` (works even without a lockfile)")] = False,
+    global_npm: Annotated[bool, typer.Option("--global", "-g", help="Security-audit globally installed `npm -g` packages")] = False,
     json_out: Annotated[bool, typer.Option("--json")] = False,
 ) -> None:
-    """Audit npm, pnpm, yarn, and bun lockfiles against OSV/OpenSSF malware advisories & poisoned URLs."""
-    _, _, advisories, _, _ = _build_runtime()
+    """Audit lockfiles and/or installed npm packages against OSV/OpenSSF malware advisories & poisoned origins."""
+    settings, _, advisories, _, _ = _build_runtime()
+
+    if installed or global_npm:
+        if global_npm:
+            root_label, installed_pkgs = scan_global_npm_packages(settings.shims_dir)
+        else:
+            root_label = str(path / "node_modules")
+            installed_pkgs = scan_installed_node_modules(path)
+
+        queries = [("npm", p.name, p.version) for p in installed_pkgs]
+        adv_map = advisories.query_batch(queries)
+
+        malware_hits: list[dict] = []
+        warn_hits: list[dict] = []
+        hook_pkgs: list[dict] = []
+        for p in installed_pkgs:
+            for adv in adv_map.get(("npm", p.name, p.version), []):
+                if adv.is_malware:
+                    malware_hits.append(
+                        {
+                            "package": f"{p.name}@{p.version}",
+                            "location": p.location,
+                            "id": adv.id,
+                            "source": adv.source,
+                            "summary": adv.summary,
+                        }
+                    )
+            for w in p.warnings:
+                warn_hits.append({"package": f"{p.name}@{p.version}", "location": p.location, "warning": w})
+            if p.has_install_script:
+                hook_pkgs.append(
+                    {
+                        "package": f"{p.name}@{p.version}",
+                        "location": p.location,
+                        "hooks": sorted(p.install_scripts.keys()),
+                    }
+                )
+
+        if json_out:
+            print(
+                json.dumps(
+                    {
+                        "mode": "global" if global_npm else "installed",
+                        "root": root_label,
+                        "scanned_installed": len(installed_pkgs),
+                        "malware": malware_hits,
+                        "warnings": warn_hits,
+                        "packages_with_install_scripts": hook_pkgs,
+                    },
+                    indent=2,
+                )
+            )
+        else:
+            console.print(
+                f"Scanned [bold]{len(installed_pkgs)}[/bold] installed package(s) in `{root_label or 'npm -g'}`."
+            )
+            if malware_hits:
+                tbl = Table(title="MALICIOUS INSTALLED PACKAGES DETECTED", title_style="bold red")
+                tbl.add_column("Package", style="bold red")
+                tbl.add_column("Advisory ID")
+                tbl.add_column("Location")
+                tbl.add_column("Summary")
+                for h in malware_hits:
+                    tbl.add_row(h["package"], h["id"], h["location"], h["summary"][:80])
+                console.print(tbl)
+            if warn_hits:
+                tbl = Table(title="Suspicious Installed Origins", title_style="bold yellow")
+                tbl.add_column("Package", style="yellow")
+                tbl.add_column("Location")
+                tbl.add_column("Warning")
+                for w in warn_hits:
+                    tbl.add_row(w["package"], w["location"], w["warning"])
+                console.print(tbl)
+            if hook_pkgs:
+                console.print(
+                    f"[dim]Info: {len(hook_pkgs)} installed package(s) declare install lifecycle scripts.[/dim]"
+                )
+            if not malware_hits and not warn_hits:
+                console.print("[bold green]PASS[/bold green]: No known malicious installed packages found.")
+
+        if malware_hits:
+            raise typer.Exit(code=1)
+        return
+
     lockfiles, locked_pkgs = discover_and_parse_lockfiles(path)
     if not lockfiles:
         err_console.print(
@@ -386,8 +541,6 @@ def cmd_audit(
             )
 
     if json_out:
-        import json
-
         print(
             json.dumps(
                 {
@@ -437,9 +590,24 @@ def cmd_audit(
 
 
 @guard_app.command("setup")
-def cmd_guard_setup() -> None:
-    """Install PATH shims for npm, npx, pnpm, yarn, bun, and bunx."""
+def cmd_guard_setup(
+    provider: Annotated[str | None, typer.Option("--provider", "-p", help="Optional LLM provider preset (ollama, llamacpp, openrouter, groq, meta, openai, anthropic, gemini, static)")] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Optional model ID override")] = None,
+    base_url: Annotated[str | None, typer.Option("--base-url", help="Optional custom base URL")] = None,
+    api_key: Annotated[str | None, typer.Option("--api-key", help="Optional API key to save in ~/.cli-guard/.env")] = None,
+    configure: Annotated[bool, typer.Option("--configure", "-c", help="Interactively choose an open-source local model or API provider")] = False,
+) -> None:
+    """Install PATH shims for npm, npx, pnpm, yarn, bun, and bunx (and optionally configure model/API)."""
     settings = Settings.from_env()
+    if configure or provider or model or base_url or api_key:
+        cmd_config_set(
+            provider=provider,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            interactive=configure and not provider,
+        )
+        settings = Settings.from_env()
     written = install_shims(settings.shims_dir)
     VerdictCache(settings.cache_db_path)
 
@@ -1187,4 +1355,48 @@ def cmd_dashboard_export(
         f"[green]Exported hosted web dashboard ({mode_txt}):[/green]\n"
         f"  • {html_path}\n"
         f"  • {json_path}"
+    )
+
+
+@app.command("mcp")
+def cmd_mcp() -> None:
+    """Start the Model Context Protocol (MCP) stdio server for AI coding agents."""
+    serve_mcp_stdio()
+
+
+@agent_app.command("setup")
+def cmd_agent_setup(
+    write_mcp: Annotated[Path | None, typer.Option("--write-mcp", help="Optional path to write/merge `mcpServers` JSON (e.g. .mcp.json)")] = None,
+) -> None:
+    """Print ready-to-use MCP configuration and agent instructions so AI coding agents use `cg`."""
+    mcp_cfg = build_agent_mcp_config()
+    if write_mcp is not None:
+        existing: dict = {}
+        if write_mcp.is_file():
+            try:
+                existing = json.loads(write_mcp.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+        servers = existing.get("mcpServers") if isinstance(existing.get("mcpServers"), dict) else {}
+        servers.update(mcp_cfg["mcpServers"])
+        existing["mcpServers"] = servers
+        write_mcp.parent.mkdir(parents=True, exist_ok=True)
+        write_mcp.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+        console.print(f"[green]Wrote cli-guard MCP server config to[/green] {write_mcp}")
+
+    console.print(
+        Panel(
+            json.dumps(mcp_cfg, indent=2),
+            title="MCP Server Config (`mcpServers` for Claude Code / Cursor / Antigravity / Codex)",
+            expand=False,
+        )
+    )
+    console.print(
+        Panel(
+            "Before running `npm install`, `npx`, `pnpm add`, `yarn add`, or `bun add`, "
+            "call the `cli-guard` MCP tool `check_package` (or run `cg check <pkg> --json`). "
+            "Never bypass a `MALICIOUS` verdict. Also keep `~/.cli-guard/shims` first on PATH.",
+            title="Recommended `AGENTS.md` / `CLAUDE.md` Rule",
+            expand=False,
+        )
     )

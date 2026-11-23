@@ -128,7 +128,13 @@ class NpmrcConfig:
     ) -> NpmrcConfig:
         """Load `.npmrc` files in npm precedence order (user -> NPM_CONFIG_USERCONFIG -> project -> env override)."""
         cfg = cls()
-        home = (user_home or Path.home()).resolve()
+        if user_home is not None:
+            home = user_home.resolve()
+        else:
+            try:
+                home = Path.home().resolve()
+            except RuntimeError:
+                home = Path.cwd().resolve()
         work_dir = (cwd or Path.cwd()).resolve()
 
         candidates: list[Path] = [home / ".npmrc"]

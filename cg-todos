@@ -1,0 +1,24 @@
+# cli-guard (`cg`) Roadmap & To-Do List
+
+## Completed
+- [x] Zero-execution 4-layer npm pipeline (`cache/OSV/age` -> `Tree-sitter AST + version diff` -> `structured LLM triage` -> `multi-turn Investigator + deterministic citation verifier`).
+- [x] Install Guard PATH shims for `npm`, `npx`, `pnpm`, `yarn`, `bun`, and `bunx` (Windows `.cmd` safe + POSIX).
+- [x] Full npm resolution parity (`.npmrc`, scoped auth, `overrides`/`resolutions`, `workspace:`/`catalog:`, `peerDependencies`, `npm install --package-lock-only --ignore-scripts`).
+- [x] Live npm monitor (`replicate.npmjs.com/registry/_changes`), salted SHA-256 commit-reveal ledger, OpenTimestamps Bitcoin anchoring + auto-upgrade, `cli-guard-ledger` GitHub sync, and OpenSSF `malicious-packages` PR automation.
+- [x] Retrospective ground-truth verification (`scripts/verify_ground_truth.py` / `cg monitor verify-truth`) checking OSV `MAL-*` and official npm `0.0.1-security` / `404` takedowns.
+- [x] Obsidian-dark web dashboard (`cg dashboard serve`, `--public-safe` GitHub Pages export, Option A `--public-api` rate-limited backend + `Dockerfile`, dedicated `CLI Runner` page).
+- [x] Pluggable open-source model & API presets (`ollama`, `llamacpp`, `openrouter`, `groq`, `together`, `meta`, `openai`, `anthropic`, `gemini`, `custom`, `static`) + `cg config set` / `cg guard setup --provider ...` saving to `~/.cli-guard/.env`.
+- [x] AI coding agent integration (`cg mcp` stdio MCP server + `cg agent setup` + non-interactive shim auto-blocking).
+- [x] Security-only audit of currently installed packages (`cg audit --installed` for `node_modules/` and `cg audit --global` for `npm -g`).
+
+## Remaining / Next Up
+- [ ] **Real Multi-Hour Capture + Bitcoin Block Confirmation + Day-10 Verification:**
+  - Push `main` and enable GitHub Pages.
+  - Run `cg monitor start --batch-limit 100 --interval 2 --workers 8 --min-llm-risk 45 --max-llm-rpm 6` for a multi-hour local capture window.
+  - Run `cg ledger upgrade` 1–6 hours later to finalize `.ots` proofs into Bitcoin blocks.
+  - Run `scripts/verify_ground_truth.py --only-flagged --auto-reveal` at 24h, 72h, and Day 10, then re-export `docs/snapshot.json` (`--public-safe`).
+- [ ] **Phase 2 — `pip` / PyPI Ecosystem (`src/cli_guard/ecosystems/pypi/`):**
+  - PyPI JSON API + in-memory `.whl` and `.tar.gz` sdist inspection (never executing `setup.py`).
+  - Python `ast` capability scanner + `setup.py` / `pyproject.toml` `[build-system]` / `.pth` reachability.
+  - Lockfile & installed audit (`requirements.txt`, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `site-packages`).
+  - Install Guard shims for `pip`, `pip3`, `uv`, and `pipx`.
