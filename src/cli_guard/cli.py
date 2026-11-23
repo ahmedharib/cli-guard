@@ -541,7 +541,7 @@ def cmd_guard_intercept(
         f"[cyan][cli-guard][/cyan] Inspecting {len(parsed.specs)} target(s) for `{manager} {parsed.action}` (zero code execution)..."
     )
 
-    resolved, resolve_warnings = adapter.resolve_transitive(parsed.specs)
+    resolved, resolve_warnings = adapter.resolve_transitive(parsed.specs, cwd=Path.cwd())
     for w in resolve_warnings:
         err_console.print(f"[yellow][cli-guard] Warning:[/yellow] {w}")
 
@@ -662,7 +662,7 @@ def cmd_guard_selftest() -> None:
                 doc = {
                     "name": "evil-canary-test",
                     "dist-tags": {"latest": "1.0.0"},
-                    "time": {"1.0.0": "2026-11-22T12:00:00Z"},
+                    "time": {"1.0.0": datetime.now(UTC).isoformat()},
                     "versions": {
                         "1.0.0": {
                             "name": "evil-canary-test",
@@ -714,7 +714,7 @@ def cmd_guard_selftest() -> None:
         )
 
         parsed = parse_package_manager_command("npm", ["install", "evil-canary-test"])
-        resolved, resolve_warnings = adapter.resolve_transitive(parsed.specs)
+        resolved, resolve_warnings = adapter.resolve_transitive(parsed.specs, cwd=Path.cwd())
         if not resolved:
             err_console.print(
                 f"[red]SELFTEST ERROR:[/red] Could not resolve mock package: {resolve_warnings}"
@@ -748,6 +748,7 @@ def cmd_monitor_start(
     batch_limit: Annotated[int, typer.Option("--batch-limit", help="Max changes per poll")] = 50,
     min_llm_risk: Annotated[int, typer.Option("--min-llm-risk", help="Escalate to LLM only when risk >= threshold")] = 30,
     max_llm_rpm: Annotated[int, typer.Option("--max-llm-rpm", help="Max Meta/LLM escalations per minute")] = 10,
+    workers: Annotated[int, typer.Option("--workers", "-w", help="Concurrent worker threads for live npm scanning")] = 8,
     fresh_hours: Annotated[float, typer.Option("--fresh-hours", help="Only scan versions published within last N hours")] = 2.0,
     ots_upgrade_interval: Annotated[float | None, typer.Option("--ots-upgrade-interval", help="Seconds between automatic Bitcoin OTS proof upgrades")] = None,
     no_auto_ots_upgrade: Annotated[bool, typer.Option("--no-auto-ots-upgrade", help="Disable periodic automatic Bitcoin OTS upgrades")] = False,
@@ -772,6 +773,7 @@ def cmd_monitor_start(
         settings=settings,
         min_llm_risk=min_llm_risk,
         max_llm_rpm=max_llm_rpm,
+        workers=workers,
         stamp_bitcoin=not no_bitcoin,
         auto_upgrade_ots=not no_auto_ots_upgrade,
         ots_upgrade_interval=ots_upgrade_interval,
@@ -1138,15 +1140,12 @@ def cmd_dashboard_serve(
 @dashboard_app.command("export")
 def cmd_dashboard_export(
     out: Annotated[Path, typer.Option("--out", "-o", help="Output directory (e.g. docs for GitHub Pages)")] = Path("docs"),
-    no_demo: Annotated[bool, typer.Option("--no-demo", help="Do not include built-in demo examples when live findings are empty")] = False,
 ) -> None:
-    """Export a static GitHub-Pages-hostable web dashboard snapshot (`index.html` + `snapshot.json`)."""
+    """Export a static GitHub-Pages-hostable web dashboard snapshot (`index.html` + `snapshot.json`) from real scan data."""
     settings = Settings.from_env()
-    html_path, json_path = export_static_dashboard(
-        settings, out, include_demo_if_empty=not no_demo
-    )
+    html_path, json_path = export_static_dashboard(settings, out)
     console.print(
-        f"[green]Exported hosted web dashboard:[/green]\n"
+        f"[green]Exported hosted web dashboard (real data only):[/green]\n"
         f"  • {html_path}\n"
         f"  • {json_path}"
     )

@@ -228,12 +228,26 @@ class NpmRegistryClient:
         headers.update(self.npmrc.auth_headers_for_url(url))
         return headers
 
+    def _client(self, *, timeout: float | None = None, url: str = "") -> httpx.Client:
+        # Bypass environment proxies for local loopback test registries while honoring `.npmrc` proxy/CA
+        is_loopback = url.startswith(("http://127.0.0.1", "http://localhost"))
+        kwargs: dict[str, Any] = {
+            "timeout": timeout or self.timeout,
+            "follow_redirects": True,
+            "verify": self.npmrc.httpx_verify(),
+        }
+        if is_loopback:
+            kwargs["trust_env"] = False
+        elif self.npmrc.httpx_proxy():
+            kwargs["proxy"] = self.npmrc.httpx_proxy()
+        return httpx.Client(**kwargs)
+
     def fetch_packument(self, name: str) -> dict[str, Any]:
         if name in self._packument_cache:
             return self._packument_cache[name]
         url = self._package_url(name)
         try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+            with self._client(url=url) as client:
                 resp = client.get(url, headers=self._headers_for(url, {"Accept": "application/json"}))
         except httpx.HTTPError as exc:
             raise RegistryError(f"Failed fetching npm metadata for '{name}': {exc}") from exc
@@ -254,7 +268,7 @@ class NpmRegistryClient:
             return True
         url = self._package_url(name)
         try:
-            with httpx.Client(timeout=min(10.0, self.timeout), follow_redirects=True) as client:
+            with self._client(timeout=min(10.0, self.timeout), url=url) as client:
                 resp = client.head(url, headers=self._headers_for(url))
                 if resp.status_code == 405:
                     resp = client.get(
@@ -320,6 +334,13 @@ class NpmRegistryClient:
             for k, v in (ver_doc.get("optionalDependencies") or {}).items()
             if isinstance(v, str)
         }
+        peer_meta = ver_doc.get("peerDependenciesMeta") or {}
+        peer_deps = {
+            str(k): str(v)
+            for k, v in (ver_doc.get("peerDependencies") or {}).items()
+            if isinstance(v, str)
+            and not (isinstance(peer_meta.get(k), dict) and peer_meta[k].get("optional"))
+        }
 
         return PackageMetadata(
             ecosystem="npm",
@@ -341,6 +362,7 @@ class NpmRegistryClient:
             bin_entries=_normalize_bin(spec.name, ver_doc.get("bin")),
             dependencies=deps,
             optional_dependencies=opt_deps,
+            peer_dependencies=peer_deps,
             deprecated=str(ver_doc["deprecated"]) if ver_doc.get("deprecated") else None,
         )
 
@@ -348,7 +370,7 @@ class NpmRegistryClient:
         if not tarball_url:
             raise RegistryError("Missing tarball URL in package metadata.")
         try:
-            with httpx.Client(timeout=self.timeout, follow_redirects=True) as client:
+            with self._client(url=tarball_url) as client:
                 with client.stream("GET", tarball_url, headers=self._headers_for(tarball_url)) as resp:
                     if resp.status_code >= 400:
                         raise RegistryError(

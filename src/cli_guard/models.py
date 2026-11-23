@@ -78,6 +78,7 @@ class PackageMetadata(BaseModel):
     bin_entries: dict[str, str] = Field(default_factory=dict)
     dependencies: dict[str, str] = Field(default_factory=dict)
     optional_dependencies: dict[str, str] = Field(default_factory=dict)
+    peer_dependencies: dict[str, str] = Field(default_factory=dict)
     deprecated: str | None = None
 
 

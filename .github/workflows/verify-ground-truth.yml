@@ -1,0 +1,49 @@
+name: Daily Ground-Truth Verification
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore cli-guard monitor state & findings
+        uses: actions/cache@v4
+        with:
+          path: ~/.cli-guard
+          key: cli-guard-verify-${{ github.run_id }}
+          restore-keys: |
+            cli-guard-state-
+            cli-guard-verify-
+
+      - name: Install cli-guard
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run retrospective OSV + official npm verification
+        env:
+          GITHUB_TOKEN: ${{ secrets.CG_GITHUB_TOKEN }}
+          CG_LEDGER_REPO: ${{ vars.CG_LEDGER_REPO }}
+        run: |
+          python scripts/verify_ground_truth.py --auto-reveal
+          if [ -n "${CG_LEDGER_REPO:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+            cg ledger push --repo "$CG_LEDGER_REPO" || true
+          fi
+
+      - name: Upload ground-truth showcase reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: ground-truth-reports
+          path: ~/.cli-guard/reports/
+          if-no-files-found: ignore

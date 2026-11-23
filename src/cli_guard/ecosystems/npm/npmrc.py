@@ -32,7 +32,22 @@ class NpmrcConfig:
     scoped_registries: dict[str, str] = field(default_factory=dict)  # "@scope" -> "https://..."
     auth_tokens: dict[str, str] = field(default_factory=dict)  # "//host/path/" -> Bearer token
     basic_auth: dict[str, str] = field(default_factory=dict)  # "//host/path/" -> Base64 basic auth
+    proxy: str | None = None
+    https_proxy: str | None = None
+    cafile: str | None = None
+    strict_ssl: bool = True
     loaded_files: list[str] = field(default_factory=list)
+
+    def httpx_verify(self) -> bool | str:
+        """Return `verify` argument for `httpx.Client` honoring `.npmrc` `cafile` and `strict-ssl`."""
+        if not self.strict_ssl:
+            return False
+        if self.cafile and Path(self.cafile).expanduser().is_file():
+            return str(Path(self.cafile).expanduser())
+        return True
+
+    def httpx_proxy(self) -> str | None:
+        return self.https_proxy or self.proxy
 
     def registry_for_package(self, package_name: str) -> str:
         """Return the configured registry URL for a scoped or unscoped package."""
@@ -85,6 +100,14 @@ class NpmrcConfig:
 
             if key == "registry":
                 self.default_registry = val.rstrip("/")
+            elif key == "proxy":
+                self.proxy = val
+            elif key == "https-proxy":
+                self.https_proxy = val
+            elif key == "cafile":
+                self.cafile = val
+            elif key == "strict-ssl":
+                self.strict_ssl = val.lower() not in {"false", "0", "no"}
             elif key.startswith("@") and key.endswith(":registry"):
                 scope = key[: -len(":registry")].lower()
                 self.scoped_registries[scope] = val.rstrip("/")

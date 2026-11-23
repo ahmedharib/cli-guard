@@ -851,11 +851,11 @@
         <a class="logo" href="#" onclick="switchView('findings'); return false;">
           <span class="logo-mark">cg</span>
           <span>cli-guard</span>
-          <span class="ver-tag">v0.1.0</span>
+          <span id="nav-version" class="ver-tag">v0.1.0</span>
         </a>
         <div class="nav-sep"></div>
         <nav class="nav-links" aria-label="Primary">
-          <button class="nav-btn active" data-view="findings" onclick="switchView('findings', this)">Findings &amp; Demo</button>
+          <button class="nav-btn active" data-view="findings" onclick="switchView('findings', this)">Inspection Reports</button>
           <button class="nav-btn" data-view="ledger" onclick="switchView('ledger', this)">Audit Ledger</button>
           <button class="nav-btn" data-view="packages" onclick="switchView('packages', this)">Packages</button>
           <button class="nav-btn" data-view="logs" onclick="switchView('logs', this)">Monitor Logs</button>
@@ -864,11 +864,11 @@
       </div>
       <div class="nav-right">
         <div id="ots-nav-status" class="ots-indicator" title="Bitcoin OpenTimestamps Anchoring">
-          <span class="dot green"></span>
-          <span id="ots-nav-text">Bitcoin OTS Anchor active</span>
+          <span id="ots-nav-dot" class="dot muted"></span>
+          <span id="ots-nav-text">Bitcoin OTS: loading...</span>
         </div>
-        <a class="top-link" href="https://github.com/ahmedharib/cli-guard#readme" target="_blank" rel="noopener">Docs</a>
-        <a class="top-link outlined" href="https://github.com/ahmedharib/cli-guard" target="_blank" rel="noopener">GitHub</a>
+        <a id="nav-docs-link" class="top-link" href="#readme" target="_blank" rel="noopener" style="display:none;">Docs</a>
+        <a id="nav-repo-link" class="top-link outlined" href="#repo" target="_blank" rel="noopener" style="display:none;">GitHub</a>
       </div>
     </div>
   </header>
@@ -1053,11 +1053,11 @@
 
   <footer>
     <div class="footer-inner">
-      <span>cli-guard v0.1.0 &middot; Deterministic supply-chain safety engine</span>
+      <span id="footer-brand">cli-guard &middot; Deterministic supply-chain safety engine</span>
       <div class="footer-right">
         <span id="footer-block">Bitcoin OTS Ledger</span>
         <span>&middot;</span>
-        <span id="footer-sync" class="footer-green">OTS Calendar In Sync</span>
+        <span id="footer-sync">Checking OTS status...</span>
       </div>
     </div>
   </footer>
@@ -1244,6 +1244,53 @@
       CURRENT_SNAPSHOT = data;
       const m = data.metrics || {};
 
+      // Dynamic version & repository links (zero hardcoded repo owner or version)
+      const ver = data.version ? `v${data.version}` : '';
+      if (ver) {
+        document.getElementById('nav-version').textContent = ver;
+        document.getElementById('footer-brand').textContent = `cli-guard ${ver} · Deterministic supply-chain safety engine`;
+      }
+      let repoUrl = (data.repo_url || '').trim();
+      if (!repoUrl && window.location.hostname.endsWith('.github.io')) {
+        const owner = window.location.hostname.replace('.github.io', '');
+        const seg = (window.location.pathname.split('/').filter(Boolean)[0] || 'cli-guard');
+        repoUrl = `https://github.com/${owner}/${seg}`;
+      }
+      if (repoUrl) {
+        const docsEl = document.getElementById('nav-docs-link');
+        const repoEl = document.getElementById('nav-repo-link');
+        docsEl.href = `${repoUrl.replace(/\/$/, '')}#readme`;
+        repoEl.href = repoUrl;
+        docsEl.style.display = 'inline-flex';
+        repoEl.style.display = 'inline-flex';
+      }
+
+      // Dynamic Bitcoin OTS status indicator (never static fake green)
+      const otsDot = document.getElementById('ots-nav-dot');
+      const otsText = document.getElementById('ots-nav-text');
+      const footerSync = document.getElementById('footer-sync');
+      if (m.ots_confirmed > 0) {
+        otsDot.className = 'dot green';
+        otsText.textContent = `Bitcoin OTS: ${m.ots_confirmed} confirmed` + (m.ots_pending ? ` · ${m.ots_pending} pending` : '');
+        footerSync.textContent = `${m.ots_confirmed} Proof(s) Verified in Bitcoin`;
+        footerSync.className = 'footer-green';
+      } else if (m.ots_pending > 0) {
+        otsDot.className = 'dot amber';
+        otsText.textContent = `Bitcoin OTS: ${m.ots_pending} pending block`;
+        footerSync.textContent = `${m.ots_pending} Pending Bitcoin Confirmation`;
+        footerSync.className = '';
+      } else if (m.ots_errors > 0) {
+        otsDot.className = 'dot red';
+        otsText.textContent = `Bitcoin OTS: ${m.ots_errors} stamp error(s)`;
+        footerSync.textContent = 'OTS Stamp Error';
+        footerSync.className = '';
+      } else {
+        otsDot.className = 'dot muted';
+        otsText.textContent = 'Bitcoin OTS: ready (0 commits)';
+        footerSync.textContent = 'OTS Ready (No Flagged Commits Yet)';
+        footerSync.className = '';
+      }
+
       document.getElementById('kpi-scanned').textContent = fmtNum(m.total_scanned);
       document.getElementById('kpi-malicious').textContent = fmtNum(m.malicious);
       document.getElementById('kpi-suspicious').textContent = fmtNum(m.suspicious);
@@ -1426,6 +1473,26 @@
       }
     }
 
+    async function maybeMergeLiveGithubLedger(snap) {
+      const params = new URLSearchParams(window.location.search);
+      const ledgerRepo = (params.get('ledger') || snap.ledger_repo || '').trim();
+      if (!ledgerRepo || !ledgerRepo.includes('/')) return snap;
+      try {
+        const resp = await fetch(`https://raw.githubusercontent.com/${ledgerRepo}/main/ledger.jsonl`, { cache: 'no-store' });
+        if (!resp.ok) return snap;
+        const lines = (await resp.text()).split('\n').filter(Boolean);
+        const remoteEntries = lines.map(l => { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+        if (remoteEntries.length) {
+          snap.ledger = remoteEntries.reverse();
+          snap.metrics = snap.metrics || {};
+          snap.metrics.ledger_commitments = remoteEntries.length;
+          snap.metrics.ots_confirmed = remoteEntries.filter(e => e.ots_status === 'confirmed').length;
+          snap.metrics.ots_pending = remoteEntries.filter(e => e.ots_status === 'pending').length;
+        }
+      } catch (_) {}
+      return snap;
+    }
+
     async function loadSnapshot() {
       try {
         const resp = await fetch('/api/snapshot', { cache: 'no-store' });
@@ -1440,7 +1507,8 @@
         const resp = await fetch('./snapshot.json', { cache: 'no-store' });
         if (resp.ok) {
           IS_LIVE = false;
-          renderSnapshot(await resp.json());
+          const snap = await maybeMergeLiveGithubLedger(await resp.json());
+          renderSnapshot(snap);
         }
       } catch (err) {
         document.getElementById('findings-list').innerHTML =

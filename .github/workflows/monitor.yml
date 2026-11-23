@@ -1,0 +1,88 @@
+name: Live npm Monitor & Dashboard Sync
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      batch_limit:
+        description: "Max npm _changes entries to inspect in this run"
+        required: false
+        default: "50"
+      min_llm_risk:
+        description: "Risk threshold (0-100) for Meta LLM escalation"
+        required: false
+        default: "40"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "cli-guard-monitor"
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Restore cli-guard monitor state & SQLite cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cli-guard
+          key: cli-guard-state-${{ github.run_id }}
+          restore-keys: |
+            cli-guard-state-
+
+      - name: Install cli-guard
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Poll live npm publishes, stamp Bitcoin OTS & upgrade proofs
+        env:
+          CG_LLM_PROVIDER: ${{ vars.CG_LLM_PROVIDER || 'meta' }}
+          MODEL_API_KEY: ${{ secrets.MODEL_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.CG_GITHUB_TOKEN }}
+          CG_LEDGER_REPO: ${{ vars.CG_LEDGER_REPO }}
+          CG_OPENSSF_REPO: ${{ vars.CG_OPENSSF_REPO || 'ossf/malicious-packages' }}
+          CG_AUTO_PUSH_LEDGER: ${{ vars.CG_AUTO_PUSH_LEDGER || 'false' }}
+          CG_AUTO_OPENSSF_PR: ${{ vars.CG_AUTO_OPENSSF_PR || 'false' }}
+          CG_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          BATCH="${{ github.event.inputs.batch_limit || '50' }}"
+          MIN_RISK="${{ github.event.inputs.min_llm_risk || '40' }}"
+          cg monitor start --once --batch-limit "$BATCH" --workers 8 --min-llm-risk "$MIN_RISK"
+          cg ledger upgrade || true
+          if [ -n "${CG_LEDGER_REPO:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
+            cg ledger push --repo "$CG_LEDGER_REPO" || true
+          fi
+          cg dashboard export --out docs
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload live dashboard snapshot
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+  deploy:
+    needs: monitor
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy updated live dashboard
+        id: deployment
+        uses: actions/deploy-pages@v4

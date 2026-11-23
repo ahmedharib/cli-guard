@@ -14,6 +14,10 @@ from cli_guard.dashboard.server import (
     export_static_dashboard,
 )
 from cli_guard.ecosystems.npm.npmrc import NpmrcConfig
+from cli_guard.ecosystems.npm.resolver import (
+    load_project_resolution_context,
+    resolve_catalog_spec,
+)
 from cli_guard.ledger.github_sync import (
     build_openssf_pr_artifacts,
     push_ledger_to_github,
@@ -40,13 +44,32 @@ def test_npmrc_scoped_registries_auth_and_env_expansion(tmp_path: Path, monkeypa
     )
     (proj_dir / ".npmrc").write_text(
         "@acme:registry=https://npm.pkg.github.com\n"
-        "//npm.pkg.github.com/:_authToken=${MY_GH_TOKEN}\n",
+        "//npm.pkg.github.com/:_authToken=${MY_GH_TOKEN}\n"
+        "https-proxy=http://proxy.corp.local:8080\n"
+        "strict-ssl=false\n",
         encoding="utf-8",
     )
 
     cfg = NpmrcConfig.load(cwd=proj_dir, user_home=home_dir)
     assert cfg.registry_for_package("lodash") == "https://registry.npmjs.org"
     assert cfg.registry_for_package("@acme/private-sdk") == "https://npm.pkg.github.com"
+    assert cfg.httpx_proxy() == "http://proxy.corp.local:8080"
+    assert cfg.httpx_verify() is False
+
+    # Project overrides & pnpm-workspace catalog resolution parity
+    (proj_dir / "package.json").write_text(
+        json.dumps({"overrides": {"lodash": "4.17.21"}, "resolutions": {"foo>bar": "2.0.0"}}),
+        encoding="utf-8",
+    )
+    (proj_dir / "pnpm-workspace.yaml").write_text(
+        "catalog:\n  chalk: '^5.3.0'\ncatalogs:\n  react18:\n    react: '^18.3.1'\n",
+        encoding="utf-8",
+    )
+    overrides, catalogs = load_project_resolution_context(proj_dir)
+    assert overrides["lodash"] == "4.17.21"
+    assert overrides["bar"] == "2.0.0"
+    assert resolve_catalog_spec("chalk", "catalog:", catalogs) == "^5.3.0"
+    assert resolve_catalog_spec("react", "catalog:react18", catalogs) == "^18.3.1"
 
     # Auth tokens ONLY attach to matching origins (no cross-origin leakage)
     assert cfg.auth_headers_for_url("https://npm.pkg.github.com/@acme%2fprivate-sdk") == {
@@ -150,9 +173,12 @@ def test_monitor_auto_ots_upgrade_respects_interval(tmp_path: Path, monkeypatch)
 
 def test_dashboard_snapshot_static_export_and_live_server(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path)
-    snap = build_dashboard_snapshot(settings, include_demo_if_empty=True)
-    assert snap["findings"]
-    assert snap["findings"][0]["is_demo"] is True
+    # Empty data dir MUST return zero fake/demo entries
+    snap = build_dashboard_snapshot(settings)
+    assert snap["findings"] == []
+    assert snap["scanned_packages"] == []
+    assert snap["ledger"] == []
+    assert snap["version"] == "0.1.0"
 
     out_dir = tmp_path / "docs"
     html_p, json_p = export_static_dashboard(settings, out_dir)

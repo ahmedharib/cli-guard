@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -39,23 +41,25 @@ def _parse_npm_time(raw: str | None) -> datetime | None:
 
 
 class TokenBucketRateLimiter:
-    """Simple sliding-window RPM limiter to cap LLM API credit burn."""
+    """Thread-safe sliding-window RPM limiter to cap LLM API credit burn."""
 
     def __init__(self, max_per_minute: int) -> None:
         self.max_per_minute = max(0, max_per_minute)
         self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
 
     def allow(self) -> bool:
         if self.max_per_minute <= 0:
             return False
-        now = time.monotonic()
-        cutoff = now - 60.0
-        while self._timestamps and self._timestamps[0] < cutoff:
-            self._timestamps.popleft()
-        if len(self._timestamps) >= self.max_per_minute:
-            return False
-        self._timestamps.append(now)
-        return True
+        with self._lock:
+            now = time.monotonic()
+            cutoff = now - 60.0
+            while self._timestamps and self._timestamps[0] < cutoff:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self.max_per_minute:
+                return False
+            self._timestamps.append(now)
+            return True
 
 
 @dataclass(slots=True)
@@ -165,6 +169,7 @@ class LiveNpmMonitor:
         settings: Settings,
         min_llm_risk: int = 40,
         max_llm_rpm: int = 10,
+        workers: int = 8,
         stamp_bitcoin: bool = True,
         auto_upgrade_ots: bool = True,
         ots_upgrade_interval: float | None = None,
@@ -176,6 +181,7 @@ class LiveNpmMonitor:
     ) -> None:
         self.settings = settings
         self.min_llm_risk = min_llm_risk
+        self.workers = max(1, min(32, workers))
         self.stamp_bitcoin = stamp_bitcoin
         self.auto_upgrade_ots = auto_upgrade_ots
         self.ots_upgrade_interval = (
@@ -191,6 +197,7 @@ class LiveNpmMonitor:
         )
         self.fresh_window_hours = fresh_window_hours
         self._last_ots_upgrade_ts: float = 0.0
+        self._state_lock = threading.Lock()
 
         self.cache = VerdictCache(settings.cache_db_path)
         self.advisories = AdvisoryClient(
@@ -355,83 +362,106 @@ class LiveNpmMonitor:
             llm_provider=self.llm_provider if allow_llm else None,
         )
 
-    def poll_once(
+    def _process_package_change(
         self,
+        pkg_name: str,
         stats: MonitorStats,
         *,
-        batch_limit: int = 50,
-        enable_llm: bool = True,
-        on_event: Callable[[str], None] | None = None,
+        enable_llm: bool,
+        on_event: Callable[[str], None] | None,
     ) -> list[FinalReport]:
-        """Poll one `_changes` batch from checkpoint, scan new versions, and record findings."""
-        seq = self.cache.get_state("npm_last_seq")
-        if not seq:
-            seq = self.rep_client.fetch_head_seq()
-            self.cache.set_state("npm_last_seq", seq)
-            stats.last_seq = seq
-            if on_event:
-                on_event(f"Initialized live npm checkpoint at update_seq={seq}")
+        """Worker function: fetches packument & evaluates newly published versions for one package."""
+        pkg_reports: list[FinalReport] = []
+        # Each worker uses its own registry client instance so packument cache is thread-safe
+        worker_registry = NpmRegistryClient(
+            registry_url=self.settings.npm_registry_url,
+            npmrc=self.registry.npmrc,
+            timeout=self.settings.http_timeout_seconds,
+            max_tarball_bytes=self.settings.max_tarball_bytes,
+            max_extracted_bytes=self.settings.max_extracted_bytes,
+            max_extracted_files=self.settings.max_extracted_files,
+        )
+        worker_adapter = NpmAdapter(self.settings, registry=worker_registry)
+        custom_settings = Settings(
+            data_dir=self.settings.data_dir,
+            llm_provider=self.settings.llm_provider,
+            llm_base_url=self.settings.llm_base_url,
+            llm_api_key=self.settings.llm_api_key,
+            triage_model=self.settings.triage_model,
+            investigator_model=self.settings.investigator_model,
+            cooldown_hours=self.settings.cooldown_hours,
+            fail_open=self.settings.fail_open,
+            max_investigator_turns=self.settings.max_investigator_turns,
+            npm_registry_url=self.settings.npm_registry_url,
+            osv_api_url=self.settings.osv_api_url,
+            http_timeout_seconds=self.settings.http_timeout_seconds,
+            triage_risk_threshold=self.min_llm_risk,
+            investigator_risk_threshold=max(self.min_llm_risk + 15, 55),
+        )
+        static_pipe = SecurityPipeline(
+            settings=custom_settings,
+            adapter=worker_adapter,
+            cache=self.cache,
+            advisories=self.advisories,
+            llm_provider=None,
+        )
+        llm_pipe = SecurityPipeline(
+            settings=custom_settings,
+            adapter=worker_adapter,
+            cache=self.cache,
+            advisories=self.advisories,
+            llm_provider=self.llm_provider if (enable_llm and self.llm_provider is not None) else None,
+        )
 
-        new_seq, pkg_names = self.rep_client.fetch_changes(since=seq, limit=batch_limit)
-        stats.batches_polled += 1
-        stats.changes_seen += len(pkg_names)
-
-        reports: list[FinalReport] = []
-        static_pipe = self._build_pipeline(allow_llm=False)
-        llm_pipe = self._build_pipeline(allow_llm=enable_llm and self.llm_provider is not None)
-
-        for pkg_name in pkg_names:
-            try:
-                # Reset per-package packument cache so we always see the fresh publish
-                self.registry._packument_cache.pop(pkg_name, None)
-                packument = self.registry.fetch_packument(pkg_name)
-                new_versions = pick_new_versions_to_scan(
-                    packument, fresh_window_hours=self.fresh_window_hours
-                )
-            except RegistryError:
-                continue
-            except Exception as exc:
+        try:
+            packument = worker_registry.fetch_packument(pkg_name)
+            new_versions = pick_new_versions_to_scan(
+                packument, fresh_window_hours=self.fresh_window_hours
+            )
+        except RegistryError:
+            return []
+        except Exception as exc:
+            with self._state_lock:
                 stats.errors += 1
-                if on_event:
-                    on_event(f"[yellow]Error fetching {pkg_name}:[/yellow] {exc}")
+                self._log_event("error", f"[yellow]Error fetching {pkg_name}:[/yellow] {exc}", on_event=on_event)
+            return []
+
+        for ver in new_versions:
+            if self.cache.has_scanned("npm", pkg_name, ver):
                 continue
+            spec = PackageSpec(ecosystem="npm", name=pkg_name, version=ver, raw_spec=f"{pkg_name}@{ver}")
+            try:
+                report = static_pipe.evaluate(
+                    spec,
+                    use_cache=True,
+                    enable_diff=True,
+                    enable_llm=False,
+                    scan_source="monitor",
+                )
 
-            for ver in new_versions:
-                if self.cache.has_scanned("npm", pkg_name, ver):
-                    continue
-                spec = PackageSpec(ecosystem="npm", name=pkg_name, version=ver, raw_spec=f"{pkg_name}@{ver}")
-                try:
-                    # First pass: Layer 0 + Layer 1 (zero LLM cost!)
-                    report = static_pipe.evaluate(
-                        spec,
-                        use_cache=True,
-                        enable_diff=True,
-                        enable_llm=False,
-                        scan_source="monitor",
-                    )
-
-                    # Escalate to Meta LLM ONLY if risk >= min_llm_risk (default 40)
-                    if (
-                        enable_llm
-                        and self.llm_provider is not None
-                        and not (report.static_report and report.static_report.deterministic_block)
-                        and report.risk_score >= self.min_llm_risk
-                    ):
-                        if self.llm_limiter.allow():
+                if (
+                    enable_llm
+                    and self.llm_provider is not None
+                    and not (report.static_report and report.static_report.deterministic_block)
+                    and report.risk_score >= self.min_llm_risk
+                ):
+                    if self.llm_limiter.allow():
+                        with self._state_lock:
                             stats.llm_escalations += 1
-                            report = llm_pipe.evaluate(
-                                spec,
-                                use_cache=False,
-                                enable_diff=True,
-                                enable_llm=True,
-                                scan_source="monitor",
-                            )
-                        else:
+                        report = llm_pipe.evaluate(
+                            spec,
+                            use_cache=False,
+                            enable_diff=True,
+                            enable_llm=True,
+                            scan_source="monitor",
+                        )
+                    else:
+                        with self._state_lock:
                             stats.llm_skipped_rate_limit += 1
 
-                    reports.append(report)
+                pkg_reports.append(report)
+                with self._state_lock:
                     stats.new_versions_scanned += 1
-
                     if report.verdict == VerdictLabel.MALICIOUS:
                         stats.malicious_count += 1
                     elif report.verdict == VerdictLabel.SUSPICIOUS:
@@ -455,7 +485,6 @@ class LiveNpmMonitor:
                                 "ots_status": saved["ots_status"],
                             }
                         )
-                        # Link finding_id on scanned_packages row
                         self.cache.record_scan(
                             ecosystem=report.ecosystem,
                             name=report.name,
@@ -476,8 +505,7 @@ class LiveNpmMonitor:
                         )
                         self._log_event(
                             "alert" if report.verdict == VerdictLabel.MALICIOUS else "warning",
-                            f"[{'red' if report.verdict == VerdictLabel.MALICIOUS else 'yellow'}]"
-                            f"FLAGGED {report.verdict.value.upper()}[/] "
+                            f"FLAGGED {report.verdict.value.upper()} "
                             f"{report.name}@{report.version} (risk={report.risk_score}) -> "
                             f"commit={saved['commitment_sha256'][:12]}... ots={saved['ots_status']}",
                             extra={
@@ -493,13 +521,69 @@ class LiveNpmMonitor:
                         self._maybe_submit_openssf_pr(
                             saved["finding_id"], report, stats, on_event=on_event
                         )
-                except Exception as exc:
+            except Exception as exc:
+                with self._state_lock:
                     stats.errors += 1
                     self._log_event(
                         "error",
-                        f"[yellow]Scan failed for {pkg_name}@{ver}:[/yellow] {exc}",
+                        f"Scan failed for {pkg_name}@{ver}: {exc}",
                         on_event=on_event,
                     )
+        return pkg_reports
+
+    def poll_once(
+        self,
+        stats: MonitorStats,
+        *,
+        batch_limit: int = 50,
+        enable_llm: bool = True,
+        on_event: Callable[[str], None] | None = None,
+    ) -> list[FinalReport]:
+        """Poll one `_changes` batch from checkpoint and scan new versions concurrently."""
+        seq = self.cache.get_state("npm_last_seq")
+        if not seq:
+            seq = self.rep_client.fetch_head_seq()
+            self.cache.set_state("npm_last_seq", seq)
+            stats.last_seq = seq
+            self._log_event(
+                "info",
+                f"Initialized live npm checkpoint at update_seq={seq}",
+                on_event=on_event,
+            )
+
+        new_seq, pkg_names = self.rep_client.fetch_changes(since=seq, limit=batch_limit)
+        stats.batches_polled += 1
+        stats.changes_seen += len(pkg_names)
+
+        reports: list[FinalReport] = []
+        if pkg_names:
+            worker_count = min(self.workers, len(pkg_names))
+            if worker_count == 1:
+                for pkg_name in pkg_names:
+                    reports.extend(
+                        self._process_package_change(
+                            pkg_name, stats, enable_llm=enable_llm, on_event=on_event
+                        )
+                    )
+            else:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as pool:
+                    futures = [
+                        pool.submit(
+                            self._process_package_change,
+                            pkg_name,
+                            stats,
+                            enable_llm=enable_llm,
+                            on_event=on_event,
+                        )
+                        for pkg_name in pkg_names
+                    ]
+                    for fut in concurrent.futures.as_completed(futures):
+                        try:
+                            reports.extend(fut.result())
+                        except Exception as exc:
+                            with self._state_lock:
+                                stats.errors += 1
+                                self._log_event("error", f"Monitor worker error: {exc}", on_event=on_event)
 
         if new_seq != seq:
             self.cache.set_state("npm_last_seq", new_seq)

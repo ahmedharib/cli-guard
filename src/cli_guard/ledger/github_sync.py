@@ -10,6 +10,7 @@ from typing import Any
 
 import httpx
 
+from cli_guard import __version__
 from cli_guard.ledger.store import FindingsLedgerStore
 
 GITHUB_API_BASE = "https://api.github.com"
@@ -48,7 +49,7 @@ def _gh_headers(token: str) -> dict[str, str]:
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "cli-guard/0.1.0",
+        "User-Agent": f"cli-guard/{__version__}",
     }
 
 
