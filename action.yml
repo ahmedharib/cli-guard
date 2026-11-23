@@ -69,6 +69,10 @@ inputs:
     description: "Optional output directory to export updated static web dashboard (`index.html` + `snapshot.json`)."
     required: false
     default: ""
+  baseline-snapshot:
+    description: "Optional prior live `snapshot.json` URL or file path to hydrate baseline state in `monitor-batch` mode."
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -138,6 +142,9 @@ runs:
           fi
           if [ "${{ inputs.auto-openssf-pr }}" = "true" ]; then
             FLAGS="$FLAGS --auto-openssf-pr --openssf-repo ${{ inputs.openssf-repo }}"
+          fi
+          if [ -n "${{ inputs.baseline-snapshot }}" ]; then
+            FLAGS="$FLAGS --baseline-snapshot ${{ inputs.baseline-snapshot }}"
           fi
           cg monitor start $FLAGS
           cg ledger upgrade || true

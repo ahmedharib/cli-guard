@@ -61,7 +61,10 @@ jobs:
         run: |
           BATCH="${{ github.event.inputs.batch_limit || '50' }}"
           MIN_RISK="${{ github.event.inputs.min_llm_risk || '40' }}"
-          cg monitor start --once --batch-limit "$BATCH" --workers 8 --min-llm-risk "$MIN_RISK"
+          PAGES_SNAPSHOT="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/snapshot.json"
+          cg monitor start --once --batch-limit "$BATCH" --workers 8 --min-llm-risk "$MIN_RISK" \
+            --baseline-snapshot "$PAGES_SNAPSHOT" \
+            --baseline-snapshot "docs/snapshot.json"
           cg ledger upgrade || true
           if [ -n "${CG_LEDGER_REPO:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
             cg ledger push --repo "$CG_LEDGER_REPO" || true

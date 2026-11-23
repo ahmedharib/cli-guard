@@ -756,6 +756,7 @@ def cmd_monitor_start(
     ledger_repo: Annotated[str | None, typer.Option("--ledger-repo", help="Public GitHub ledger repo (e.g. owner/cli-guard-ledger)")] = None,
     auto_openssf_pr: Annotated[bool, typer.Option("--auto-openssf-pr", help="Auto-open OpenSSF PR on confirmed MALICIOUS detections")] = False,
     openssf_repo: Annotated[str | None, typer.Option("--openssf-repo", help="Upstream OpenSSF repo (default ossf/malicious-packages)")] = None,
+    baseline_snapshot: Annotated[list[str] | None, typer.Option("--baseline-snapshot", help="Prior live snapshot.json URL or local file path to hydrate baseline seq/history before polling")] = None,
     once: Annotated[bool, typer.Option("--once", help="Poll one batch and exit (great for testing)")] = False,
     no_llm: Annotated[bool, typer.Option("--no-llm", help="Run Layer 0 + Layer 1 only (0 LLM calls)")] = False,
     no_bitcoin: Annotated[bool, typer.Option("--no-bitcoin", help="Skip OpenTimestamps Bitcoin anchoring")] = False,
@@ -780,6 +781,9 @@ def cmd_monitor_start(
         auto_push_ledger=auto_push_ledger or settings.auto_push_ledger,
         auto_openssf_pr=auto_openssf_pr or settings.auto_openssf_pr,
         fresh_window_hours=fresh_hours,
+        baseline_snapshots=baseline_snapshot or (
+            [str(Path("docs/snapshot.json"))] if Path("docs/snapshot.json").is_file() else []
+        ),
     )
     stats = MonitorStats()
     console.print(

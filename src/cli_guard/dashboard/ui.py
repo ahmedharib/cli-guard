@@ -152,18 +152,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       gap: 10px;
       flex-shrink: 0;
     }
-    .ots-indicator {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      font-family: var(--mono);
-      font-size: 11.5px;
-      color: var(--text-secondary);
-      background: var(--surface);
-      border: 1px solid var(--border);
-      padding: 5px 10px;
-      border-radius: 7px;
-    }
     .dot {
       width: 6px;
       height: 6px;
@@ -634,7 +622,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 20px;
-      margin-top: 32px;
+      margin-top: 0;
     }
     .scanner-head {
       display: flex;
@@ -858,18 +846,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="nav-sep"></div>
         <nav class="nav-links" aria-label="Primary">
           <button class="nav-btn active" data-view="findings" onclick="switchView('findings', this)">Inspection Reports</button>
+          <button class="nav-btn" data-view="runner" onclick="switchView('runner', this)">CLI Runner</button>
           <button class="nav-btn" data-view="ledger" onclick="switchView('ledger', this)">Audit Ledger</button>
           <button class="nav-btn" data-view="packages" onclick="switchView('packages', this)">Packages</button>
           <button class="nav-btn" data-view="logs" onclick="switchView('logs', this)">Monitor Logs</button>
-          <button class="nav-btn" data-view="runner" onclick="switchView('runner', this)">CLI Runner</button>
         </nav>
       </div>
       <div class="nav-right">
-        <div id="ots-nav-status" class="ots-indicator" title="Bitcoin OpenTimestamps Anchoring">
-          <span id="ots-nav-dot" class="dot muted"></span>
-          <span id="ots-nav-text">Bitcoin OTS: loading...</span>
-        </div>
-        <a id="nav-docs-link" class="top-link" href="#readme" target="_blank" rel="noopener" style="display:none;">Docs</a>
         <a id="nav-repo-link" class="top-link outlined" href="#repo" target="_blank" rel="noopener" style="display:none;">GitHub</a>
       </div>
     </div>
@@ -940,8 +923,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
 
       <div id="findings-list"></div>
+    </section>
 
-      <!-- Inline Live Package Scanner (matches mockup layout) -->
+    <!-- View: CLI Runner (own dedicated page) -->
+    <section id="view-runner" class="view">
       <div id="inline-scanner" class="scanner-card">
         <div class="scanner-head">
           <div>
@@ -1259,36 +1244,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         repoUrl = `https://github.com/${owner}/${seg}`;
       }
       if (repoUrl) {
-        const docsEl = document.getElementById('nav-docs-link');
         const repoEl = document.getElementById('nav-repo-link');
-        docsEl.href = `${repoUrl.replace(/\/$/, '')}#readme`;
         repoEl.href = repoUrl;
-        docsEl.style.display = 'inline-flex';
         repoEl.style.display = 'inline-flex';
       }
 
-      // Dynamic Bitcoin OTS status indicator (never static fake green)
-      const otsDot = document.getElementById('ots-nav-dot');
-      const otsText = document.getElementById('ots-nav-text');
+      // Dynamic Bitcoin OTS status in footer
       const footerSync = document.getElementById('footer-sync');
       if (m.ots_confirmed > 0) {
-        otsDot.className = 'dot green';
-        otsText.textContent = `Bitcoin OTS: ${m.ots_confirmed} confirmed` + (m.ots_pending ? ` · ${m.ots_pending} pending` : '');
         footerSync.textContent = `${m.ots_confirmed} Proof(s) Verified in Bitcoin`;
         footerSync.className = 'footer-green';
       } else if (m.ots_pending > 0) {
-        otsDot.className = 'dot amber';
-        otsText.textContent = `Bitcoin OTS: ${m.ots_pending} pending block`;
         footerSync.textContent = `${m.ots_pending} Pending Bitcoin Confirmation`;
         footerSync.className = '';
       } else if (m.ots_errors > 0) {
-        otsDot.className = 'dot red';
-        otsText.textContent = `Bitcoin OTS: ${m.ots_errors} stamp error(s)`;
         footerSync.textContent = 'OTS Stamp Error';
         footerSync.className = '';
       } else {
-        otsDot.className = 'dot muted';
-        otsText.textContent = 'Bitcoin OTS: ready (0 commits)';
         footerSync.textContent = 'OTS Ready (No Flagged Commits Yet)';
         footerSync.className = '';
       }
@@ -1390,17 +1362,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         if (targetBtn) targetBtn.classList.add('active');
       }
 
-      if (viewName === 'runner') {
-        document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-        document.getElementById('view-findings').classList.add('active');
-        document.getElementById('inline-scanner').scrollIntoView({ behavior: 'smooth', block: 'start' });
-        document.getElementById('scan-input').focus();
-        return;
-      }
-
       document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
       const target = document.getElementById('view-' + viewName);
       if (target) target.classList.add('active');
+      if (viewName === 'runner') {
+        const input = document.getElementById('scan-input');
+        if (input) input.focus();
+      }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
@@ -1466,12 +1434,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     async function upgradeOts() {
       if (!IS_LIVE) return;
-      document.getElementById('ots-nav-text').textContent = 'Upgrading OTS proofs...';
+      const btn = document.getElementById('btn-upgrade-ots');
+      if (btn) btn.textContent = 'Upgrading OTS proofs...';
       try {
         await fetch('/api/ots/upgrade', { method: 'POST' });
         await loadSnapshot();
       } finally {
-        document.getElementById('ots-nav-text').textContent = 'Bitcoin OTS Anchor active';
+        if (btn) btn.textContent = 'Upgrade Pending OTS';
       }
     }
 

@@ -23,6 +23,7 @@ from cli_guard.ledger.github_sync import push_ledger_to_github, submit_openssf_p
 from cli_guard.ledger.store import FindingsLedgerStore
 from cli_guard.llm.factory import create_provider
 from cli_guard.models import FinalReport, PackageSpec, VerdictLabel
+from cli_guard.monitor.state_sync import hydrate_state_from_snapshot
 
 REPLICATE_BASE_URL = "https://replicate.npmjs.com"
 SECURITY_PLACEHOLDER_VERSIONS: frozenset[str] = frozenset(
@@ -176,6 +177,7 @@ class LiveNpmMonitor:
         auto_push_ledger: bool | None = None,
         auto_openssf_pr: bool | None = None,
         fresh_window_hours: float = 2.0,
+        baseline_snapshots: list[str] | None = None,
         rep_client: NpmReplicationClient | None = None,
         registry_client: NpmRegistryClient | None = None,
     ) -> None:
@@ -196,6 +198,8 @@ class LiveNpmMonitor:
             auto_openssf_pr if auto_openssf_pr is not None else settings.auto_openssf_pr
         )
         self.fresh_window_hours = fresh_window_hours
+        self.baseline_snapshots = list(baseline_snapshots or [])
+        self._hydrated_baseline = False
         self._last_ots_upgrade_ts: float = 0.0
         self._state_lock = threading.Lock()
 
@@ -540,6 +544,20 @@ class LiveNpmMonitor:
         on_event: Callable[[str], None] | None = None,
     ) -> list[FinalReport]:
         """Poll one `_changes` batch from checkpoint and scan new versions concurrently."""
+        if not self._hydrated_baseline and self.baseline_snapshots:
+            self._hydrated_baseline = True
+            h_res = hydrate_state_from_snapshot(self.settings, self.baseline_snapshots)
+            if h_res.source and (
+                h_res.seq_restored or h_res.scanned_added or h_res.findings_added or h_res.ledger_added
+            ):
+                self._log_event(
+                    "info",
+                    f"Hydrated baseline state from {h_res.source} "
+                    f"(seq={h_res.seq_restored or 'kept'}, scanned=+{h_res.scanned_added}, "
+                    f"findings=+{h_res.findings_added}, ledger=+{h_res.ledger_added})",
+                    on_event=on_event,
+                )
+
         seq = self.cache.get_state("npm_last_seq")
         if not seq:
             seq = self.rep_client.fetch_head_seq()

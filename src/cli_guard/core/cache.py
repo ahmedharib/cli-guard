@@ -269,6 +269,48 @@ class VerdictCache:
                 ),
             )
 
+    def record_scan_if_missing(
+        self,
+        *,
+        ecosystem: str,
+        name: str,
+        version: str,
+        integrity: str,
+        published_at: str,
+        scanned_at: str,
+        scan_source: str,
+        verdict: str,
+        risk_score: int,
+        layers_run: list[str],
+        summary: str,
+        finding_id: str = "",
+    ) -> bool:
+        """Insert a scanned_packages row only if (ecosystem, name, version) does not already exist."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO scanned_packages
+                (ecosystem, name, version, integrity, published_at, scanned_at, scan_source,
+                 verdict, risk_score, layers_json, summary, finding_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    ecosystem,
+                    name,
+                    version,
+                    integrity,
+                    published_at,
+                    scanned_at,
+                    scan_source,
+                    verdict,
+                    risk_score,
+                    json.dumps(layers_run),
+                    summary[:400],
+                    finding_id,
+                ),
+            )
+            return cur.rowcount > 0
+
     def has_scanned(self, ecosystem: str, name: str, version: str) -> bool:
         with self._connect() as conn:
             row = conn.execute(
