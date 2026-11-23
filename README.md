@@ -106,16 +106,31 @@ Outputs timestamped JSON and Markdown showcase reports under `~/.cli-guard/repor
 
 ---
 
-## Live & Hosted Web Dashboard
+## Live & Hosted Web Dashboard (Option A: Static Showcase + Rate-Limited Public API)
 
-View live monitor logs, preserved code excerpts, Bitcoin OpenTimestamps proofs, scanned packages, and run interactive checks:
+The web dashboard supports two modes in a single unified UI:
+
+1. **GitHub Pages Showcase (`--public-safe` by default):**
+   Exports `docs/index.html` + `docs/snapshot.json` with **unconfirmed `SUSPICIOUS` packages automatically redacted** behind their salted SHA-256 commitments + Bitcoin `.ots` entries (matching responsible disclosure). Confirmed True Positives (`cg ledger reveal` / Day-10 ground truth) and benign clearances display in full.
 
 ```powershell
-# Start live local dashboard server
-.\.venv\Scripts\cg.exe dashboard serve --host 127.0.0.1 --port 8787
+# Export public-safe GitHub Pages showcase (redacts unconfirmed flags)
+.\.venv\Scripts\cg.exe dashboard export --out docs --public-safe
 
-# Export static snapshot for GitHub Pages (`docs/index.html` + `docs/snapshot.json`)
-.\.venv\Scripts\cg.exe dashboard export --out docs
+# Run live local dashboard (no redaction, interactive CLI Runner + OTS upgrade button)
+.\.venv\Scripts\cg.exe dashboard serve --host 127.0.0.1 --port 8787
+```
+
+2. **Public Interactive `CLI Runner` Backend (`Dockerfile` + `--public-api`):**
+   Deploy the included [Dockerfile](Dockerfile) to Render, Fly.io, Railway, or Google Cloud Run to power the `CLI Runner` tab on your GitHub Pages site with built-in IP rate limits (`--ip-limit-hour 15`), daily LLM caps (`--ip-llm-day 3`, `--global-llm-day 50`, falling back gracefully to free Layer 0+1 AST analysis when capped), and CORS:
+
+```powershell
+# Start public-safe CORS API locally or in container
+cg dashboard serve --host 0.0.0.0 --port 8080 --public-api --cors-origin https://<user>.github.io --trust-proxy
+
+# Embed the deployed API URL into GitHub Pages snapshot (or pass ?api=https://... in the browser URL)
+$env:CG_PUBLIC_API_URL = "https://your-cli-guard-api.onrender.com"
+cg dashboard export --out docs --public-safe
 ```
 
 This repository also includes [`.github/workflows/pages.yml`](.github/workflows/pages.yml) so enabling **Settings → Pages → Source: GitHub Actions** automatically hosts the web dashboard on GitHub Pages.

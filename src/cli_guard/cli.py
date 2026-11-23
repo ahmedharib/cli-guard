@@ -26,7 +26,11 @@ from cli_guard.config import PROVIDER_PRESETS, Settings
 from cli_guard.core.advisories import AdvisoryClient
 from cli_guard.core.cache import VerdictCache
 from cli_guard.core.pipeline import SecurityPipeline
-from cli_guard.dashboard.server import create_dashboard_server, export_static_dashboard
+from cli_guard.dashboard.server import (
+    PublicApiLimiter,
+    create_dashboard_server,
+    export_static_dashboard,
+)
 from cli_guard.ecosystems.npm.command_parser import parse_package_manager_command
 from cli_guard.ecosystems.npm.lockfile import discover_and_parse_lockfiles
 from cli_guard.ecosystems.npm.npmrc import NpmrcConfig
@@ -1120,16 +1124,45 @@ def cmd_ledger_submit_openssf(
 def cmd_dashboard_serve(
     host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
     port: Annotated[int, typer.Option("--port", "-p")] = 8787,
+    public_api: Annotated[bool, typer.Option("--public-api", help="Enable CORS, public-safe redaction, and IP/daily LLM rate limits for Option A public hosting")] = False,
+    cors_origin: Annotated[str | None, typer.Option("--cors-origin", help="Allowed CORS origin (e.g. https://<user>.github.io or *)")] = None,
+    ip_limit_hour: Annotated[int, typer.Option("--ip-limit-hour", help="Max /api/check requests per IP per hour in --public-api mode")] = 15,
+    ip_llm_day: Annotated[int, typer.Option("--ip-llm-day", help="Max fresh LLM checks per IP per day in --public-api mode")] = 3,
+    global_llm_day: Annotated[int, typer.Option("--global-llm-day", help="Max global fresh LLM checks per day in --public-api mode")] = 50,
+    trust_proxy: Annotated[bool, typer.Option("--trust-proxy", help="Trust X-Forwarded-For header behind Render/Fly/Cloud Run proxies")] = False,
 ) -> None:
-    """Start the live local web dashboard for logs, findings, Bitcoin OTS ledger, and interactive scans."""
+    """Start the live web dashboard / Option A rate-limited public API server."""
     settings = Settings.from_env()
-    server = create_dashboard_server(settings, host=host, port=port)
+    limiter = (
+        PublicApiLimiter(
+            max_checks_per_ip_hour=ip_limit_hour,
+            max_llm_per_ip_day=ip_llm_day,
+            max_llm_global_day=global_llm_day,
+        )
+        if public_api
+        else None
+    )
+    server = create_dashboard_server(
+        settings,
+        host=host,
+        port=port,
+        public_api=public_api,
+        cors_origin=cors_origin,
+        trust_proxy=trust_proxy,
+        limiter=limiter,
+    )
+    mode_label = (
+        f"Public API (CORS={cors_origin or '*'}, {ip_limit_hour} checks/IP/hr, {global_llm_day} LLM/day)"
+        if public_api
+        else "Local Live Dashboard"
+    )
     console.print(
         Panel(
             f"URL: [bold cyan]http://{host}:{port}[/bold cyan]\n"
+            f"Mode: {mode_label}\n"
             f"Data dir: {settings.data_dir}\n"
             "Press Ctrl+C to stop.",
-            title="cli-guard Live Web Dashboard",
+            title="cli-guard Web Dashboard",
             expand=False,
         )
     )
@@ -1144,12 +1177,14 @@ def cmd_dashboard_serve(
 @dashboard_app.command("export")
 def cmd_dashboard_export(
     out: Annotated[Path, typer.Option("--out", "-o", help="Output directory (e.g. docs for GitHub Pages)")] = Path("docs"),
+    public_safe: Annotated[bool, typer.Option("--public-safe/--include-unrevealed", help="Redact unconfirmed suspicious/malicious package names behind salted commitments (recommended for public GitHub Pages)")] = True,
 ) -> None:
     """Export a static GitHub-Pages-hostable web dashboard snapshot (`index.html` + `snapshot.json`) from real scan data."""
     settings = Settings.from_env()
-    html_path, json_path = export_static_dashboard(settings, out)
+    html_path, json_path = export_static_dashboard(settings, out, public_safe=public_safe)
+    mode_txt = "public-safe redacted" if public_safe else "full unredacted"
     console.print(
-        f"[green]Exported hosted web dashboard (real data only):[/green]\n"
+        f"[green]Exported hosted web dashboard ({mode_txt}):[/green]\n"
         f"  • {html_path}\n"
         f"  • {json_path}"
     )

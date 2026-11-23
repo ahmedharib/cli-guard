@@ -1,8 +1,6 @@
 name: Live npm Monitor & Dashboard Sync
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       batch_limit:
@@ -69,7 +67,7 @@ jobs:
           if [ -n "${CG_LEDGER_REPO:-}" ] && [ -n "${GITHUB_TOKEN:-}" ]; then
             cg ledger push --repo "$CG_LEDGER_REPO" || true
           fi
-          cg dashboard export --out docs
+          cg dashboard export --out docs --public-safe
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

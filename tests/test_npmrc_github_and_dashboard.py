@@ -10,6 +10,7 @@ import pytest
 from cli_guard.config import Settings
 from cli_guard.core.cache import VerdictCache
 from cli_guard.dashboard.server import (
+    PublicApiLimiter,
     build_dashboard_snapshot,
     create_dashboard_server,
     export_static_dashboard,
@@ -347,3 +348,201 @@ def test_baseline_snapshot_hydration_cold_start_and_merge(tmp_path: Path) -> Non
     assert cache.get_state("npm_last_seq") == "250"
     assert len(cache.list_scanned_packages(ecosystem="npm")) == 3
     assert len(ledger.list_ledger_entries()) == 1
+
+
+def test_public_safe_redacts_unconfirmed_findings_and_keeps_confirmed_and_benign(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(data_dir=tmp_path)
+    cache = VerdictCache(settings.cache_db_path)
+    store = FindingsLedgerStore(settings.data_dir)
+
+    # 1. Unconfirmed suspicious finding (must NOT leak package name in public_safe=True)
+    unconf_rep = FinalReport(
+        ecosystem="npm",
+        name="secret-unconfirmed-pkg",
+        version="1.0.0",
+        integrity="sha512-unconf",
+        verdict=VerdictLabel.SUSPICIOUS,
+        risk_score=65,
+        summary="Flagged suspicious install script.",
+    )
+    saved_unconf = store.record_finding(unconf_rep, scan_source="monitor", stamp_bitcoin=False)
+    cache.record_scan(
+        ecosystem="npm",
+        name="secret-unconfirmed-pkg",
+        version="1.0.0",
+        integrity="sha512-unconf",
+        published_at="2026-11-23T18:00:00+00:00",
+        scanned_at="2026-11-23T18:05:00+00:00",
+        scan_source="monitor",
+        verdict="suspicious",
+        risk_score=65,
+        layers_run=["layer0", "layer1"],
+        summary="Flagged suspicious install script.",
+        finding_id=saved_unconf["finding_id"],
+    )
+
+    # 2. Confirmed + revealed malicious finding (MUST appear in public_safe=True)
+    conf_rep = FinalReport(
+        ecosystem="npm",
+        name="confirmed-evil-pkg",
+        version="2.0.0",
+        integrity="sha512-conf",
+        verdict=VerdictLabel.MALICIOUS,
+        risk_score=100,
+        summary="Confirmed credential stealer.",
+    )
+    saved_conf = store.record_finding(conf_rep, scan_source="monitor", stamp_bitcoin=False)
+    store.update_finding_ground_truth(
+        saved_conf["finding_id"], {"classification": "TRUE_POSITIVE_EARLY_CATCH"}
+    )
+    store.reveal_finding(saved_conf["finding_id"], verify_bitcoin_header=False)
+    cache.record_scan(
+        ecosystem="npm",
+        name="confirmed-evil-pkg",
+        version="2.0.0",
+        integrity="sha512-conf",
+        published_at="2026-11-23T17:00:00+00:00",
+        scanned_at="2026-11-23T17:05:00+00:00",
+        scan_source="monitor",
+        verdict="malicious",
+        risk_score=100,
+        layers_run=["layer0", "layer1"],
+        summary="Confirmed credential stealer.",
+        finding_id=saved_conf["finding_id"],
+    )
+
+    # 3. Benign cached package (MUST appear in public_safe=True)
+    ben_rep = FinalReport(
+        ecosystem="npm",
+        name="lodash",
+        version="4.17.21",
+        integrity="sha512-lodash",
+        verdict=VerdictLabel.BENIGN,
+        risk_score=0,
+        summary="Clean.",
+    )
+    cache.put(ben_rep)
+    cache.record_scan(
+        ecosystem="npm",
+        name="lodash",
+        version="4.17.21",
+        integrity="sha512-lodash",
+        published_at="2021-02-20T00:00:00+00:00",
+        scanned_at="2026-11-23T17:06:00+00:00",
+        scan_source="monitor",
+        verdict="benign",
+        risk_score=0,
+        layers_run=["layer0", "layer1"],
+        summary="Clean.",
+    )
+
+    # Monitor log containing unconfirmed package name
+    settings.logs_dir.mkdir(parents=True, exist_ok=True)
+    (settings.logs_dir / "monitor.jsonl").write_text(
+        json.dumps(
+            {
+                "ts_utc": "2026-11-23T18:05:00+00:00",
+                "level": "warning",
+                "package": "secret-unconfirmed-pkg@1.0.0",
+                "finding_id": saved_unconf["finding_id"],
+                "message": "FLAGGED SUSPICIOUS secret-unconfirmed-pkg@1.0.0",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    snap = build_dashboard_snapshot(settings, public_safe=True)
+    assert snap["public_safe"] is True
+    # Counts remain truthful
+    assert snap["metrics"]["total_scanned"] == 3
+    assert snap["metrics"]["suspicious"] == 1
+    assert snap["metrics"]["malicious"] == 1
+    assert snap["metrics"]["benign"] == 1
+
+    finding_names = {f["report"]["name"] for f in snap["findings"]}
+    assert "confirmed-evil-pkg" in finding_names
+    assert "lodash" in finding_names
+    assert "secret-unconfirmed-pkg" not in finding_names
+    assert "secret-unconfirmed-pkg" not in json.dumps(snap["findings"])
+    assert "secret-unconfirmed-pkg" not in json.dumps(snap["scanned_packages"])
+    assert "secret-unconfirmed-pkg" not in json.dumps(snap["logs"])
+    # Unconfirmed commitment STILL appears in ledger as an opaque hash
+    assert any(
+        e["finding_id"] == saved_unconf["finding_id"] and not e.get("name")
+        for e in snap["ledger"]
+    )
+
+
+def test_public_api_mode_rate_limiting_cors_and_admin_lockdown(tmp_path: Path) -> None:
+    limiter = PublicApiLimiter(
+        max_checks_per_ip_hour=2,
+        max_llm_per_ip_day=1,
+        max_llm_global_day=2,
+    )
+    assert limiter.allow_check("1.2.3.4") == (True, 0)
+    assert limiter.allow_check("1.2.3.4") == (True, 0)
+    allowed, retry = limiter.allow_check("1.2.3.4")
+    assert allowed is False and retry > 0
+    assert limiter.allow_llm("1.2.3.4") is True
+    assert limiter.allow_llm("1.2.3.4") is False  # Per-IP daily cap hit
+    assert limiter.allow_llm("5.6.7.8") is True
+    assert limiter.allow_llm("9.9.9.9") is False  # Global daily cap hit
+
+    settings = Settings(data_dir=tmp_path)
+    srv_limiter = PublicApiLimiter(max_checks_per_ip_hour=1, max_llm_per_ip_day=0, max_llm_global_day=0)
+    server = create_dashboard_server(
+        settings,
+        host="127.0.0.1",
+        port=0,
+        public_api=True,
+        cors_origin="https://ahmedharib.github.io",
+        limiter=srv_limiter,
+    )
+    import threading
+
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        port = server.server_address[1]
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        # CORS preflight
+        req_opt = urllib.request.Request(f"http://127.0.0.1:{port}/api/check", method="OPTIONS")
+        with opener.open(req_opt, timeout=5) as resp:
+            assert resp.status == 204
+            assert resp.headers.get("Access-Control-Allow-Origin") == "https://ahmedharib.github.io"
+
+        # /api/ots/upgrade locked down in public_api mode
+        req_ots = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/ots/upgrade", data=b"{}", method="POST"
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_ots:
+            opener.open(req_ots, timeout=5)
+        assert exc_ots.value.code == 403
+
+        # 1st /api/check consumes quota (with invalid empty package -> 400); 2nd hits 429 rate limit
+        req_c1 = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/check",
+            data=b'{"package":""}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_c1:
+            opener.open(req_c1, timeout=5)
+        assert exc_c1.value.code == 400
+
+        req_c2 = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/check",
+            data=b'{"package":"lodash"}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as exc_c2:
+            opener.open(req_c2, timeout=5)
+        assert exc_c2.value.code == 429
+    finally:
+        server.shutdown()
+        server.server_close()

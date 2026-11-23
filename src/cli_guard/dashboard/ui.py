@@ -1051,6 +1051,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   <script>
     let IS_LIVE = false;
+    let API_BASE = '';
+    let CAN_RUN_CHECKS = false;
     let CURRENT_SNAPSHOT = null;
     let FINDING_FILTER = 'all';
 
@@ -1280,14 +1282,30 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const daemonLbl = document.getElementById('daemon-label');
       const termStatus = document.getElementById('term-status');
       const upgradeBtn = document.getElementById('btn-upgrade-ots');
+      const params = new URLSearchParams(window.location.search);
+      const configuredApi = (params.get('api') || data.public_api_url || '').trim().replace(/\/$/, '');
+
       if (IS_LIVE) {
+        API_BASE = '';
+        CAN_RUN_CHECKS = true;
         daemonDot.className = 'dot green';
         daemonLbl.innerHTML = `Daemon: <strong>${esc(window.location.host)}</strong>`;
         termStatus.textContent = 'DAEMON READY';
         upgradeBtn.style.display = 'inline-block';
+      } else if (configuredApi) {
+        API_BASE = configuredApi;
+        CAN_RUN_CHECKS = true;
+        let apiHost = configuredApi;
+        try { apiHost = new URL(configuredApi).host; } catch (_) {}
+        daemonDot.className = 'dot green';
+        daemonLbl.innerHTML = `Public API: <strong>${esc(apiHost)}</strong>`;
+        termStatus.textContent = 'API READY';
+        upgradeBtn.style.display = 'none';
       } else {
+        API_BASE = '';
+        CAN_RUN_CHECKS = false;
         daemonDot.className = 'dot amber';
-        daemonLbl.innerHTML = `Mode: <strong>Hosted Snapshot</strong>`;
+        daemonLbl.innerHTML = `Mode: <strong>Static Showcase</strong>`;
         termStatus.textContent = 'STATIC MODE';
         upgradeBtn.style.display = 'none';
       }
@@ -1381,7 +1399,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     function pickPreset(spec) {
       document.getElementById('scan-input').value = spec;
-      if (IS_LIVE) runPackageCheck();
+      if (CAN_RUN_CHECKS) runPackageCheck();
     }
 
     async function runPackageCheck() {
@@ -1390,12 +1408,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       const status = document.getElementById('term-status');
       if (!spec) return;
 
-      if (!IS_LIVE) {
+      if (!CAN_RUN_CHECKS) {
         term.textContent =
           `> Target: ${spec}\n` +
-          `> Hosted GitHub Pages runs in static read-only snapshot mode.\n` +
-          `> To run interactive live scans from this UI, start the local daemon:\n` +
-          `  $ cg dashboard serve --port 8787`;
+          `> No live API endpoint configured for this static GitHub Pages showcase.\n` +
+          `> Either start the local dashboard:\n` +
+          `  $ cg dashboard serve --port 8787\n` +
+          `> Or connect a deployed Option A public API via CG_PUBLIC_API_URL or ?api=https://your-api-url`;
         return;
       }
 
@@ -1405,30 +1424,32 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         `> Unpacking tarball strictly in memory and running Tree-sitter AST + version diff...`;
 
       try {
-        const resp = await fetch('/api/check', {
+        const resp = await fetch(`${API_BASE}/api/check`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ package: spec }),
         });
         const data = await resp.json();
         if (!resp.ok) {
-          status.textContent = 'ERROR';
+          status.textContent = resp.status === 429 ? 'RATE LIMITED' : 'ERROR';
           term.textContent = `> Error checking ${spec}: ${data.error || resp.statusText}`;
           return;
         }
         status.textContent = (data.verdict || 'DONE').toUpperCase();
         const layers = (data.layers_run || []).join(' -> ');
         const reasons = ((data.static_report || {}).risk_reasons || []).map(r => `  - ${r}`).join('\n');
+        const notice = ((data.extra || {}).rate_limit_notice || '');
         term.textContent =
           `> Verdict:   ${String(data.verdict || '').toUpperCase()} (${data.name}@${data.version})\n` +
           `> Risk:      ${data.risk_score}/100${data.from_cache ? ' (SQLite SHA-512 cache hit)' : ''}\n` +
           `> Pipeline:  ${layers}\n` +
           `> Summary:   ${data.summary}\n` +
+          (notice ? `> Notice:    ${notice}\n` : '') +
           (reasons ? `> Signals:\n${reasons}` : '> Signals:   none');
-        loadSnapshot();
+        if (IS_LIVE) loadSnapshot();
       } catch (err) {
         status.textContent = 'OFFLINE';
-        term.textContent = `> Daemon request failed: ${err}`;
+        term.textContent = `> API request failed: ${err}`;
       }
     }
 
