@@ -9,3 +9,4 @@ build/
 .cli-guard/
 *.db
 *.sqlite3
+cg-todos
