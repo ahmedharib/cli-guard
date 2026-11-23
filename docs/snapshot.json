@@ -2,7 +2,7 @@
   "version": "0.1.0",
   "public_safe": true,
   "repo_url": "",
-  "public_api_url": "https://cli-guard-api.onrender.com",
+  "public_api_url": "https://cli-guard.onrender.com",
   "ledger_repo": "",
   "generated_at_utc": "2026-11-23T21:22:30.160896+00:00",
   "provider": "meta",

@@ -56,6 +56,7 @@ jobs:
           CG_AUTO_PUSH_LEDGER: ${{ vars.CG_AUTO_PUSH_LEDGER || 'false' }}
           CG_AUTO_OPENSSF_PR: ${{ vars.CG_AUTO_OPENSSF_PR || 'false' }}
           CG_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          CG_PUBLIC_API_URL: ${{ vars.CG_PUBLIC_API_URL || 'https://cli-guard.onrender.com' }}
         run: |
           BATCH="${{ github.event.inputs.batch_limit || '50' }}"
           MIN_RISK="${{ github.event.inputs.min_llm_risk || '40' }}"
