@@ -80,21 +80,37 @@ Copy-Item .env.example .env
 
 ## Operator npm Monitor, Bitcoin OpenTimestamps Ledger & OpenSSF PRs
 
-`cg monitor` is **operator and research infrastructure** (not an end-user web tool): it polls `https://replicate.npmjs.com/registry/_changes` (compliant with npm's May 2025 replication API), scans newly published releases with Layer 0 + Layer 1, gates LLM escalations by `--min-llm-risk` and `--max-llm-rpm`, preserves cited code excerpts locally before npm deletes malicious tarballs, stamps salted SHA-256 commitments into Bitcoin via **OpenTimestamps**, **automatically upgrades pending `.ots` proofs** on schedule, pushes public commitments to your **`cli-guard-ledger`** GitHub repo, and powers the **read-only public proof** views on the showcase site. Only verified `malicious` findings submit Pull Requests to **`ossf/malicious-packages`**.
+`cg monitor` is **operator and research infrastructure** (not an end-user web tool): it polls `https://replicate.npmjs.com/registry/_changes` (compliant with npm's May 2025 replication API), automatically fast-forwards stale checkpoints to live publishes (unless `--backfill` is passed), scans newly published releases with Layer 0 + Layer 1 (verifying tarball SHA-512/SHA-1 integrity in memory), gates LLM escalations by `--min-llm-risk` and `--max-llm-rpm`, preserves cited code excerpts locally before npm deletes malicious tarballs, stamps salted SHA-256 commitments into Bitcoin via **OpenTimestamps**, **automatically upgrades pending `.ots` proofs** and runs periodic **ground-truth checks** inside the loop, pushes public commitments + a redacted `public_snapshot.json` to your **`cli-guard-ledger`** GitHub repo (updating the GitHub Pages showcase live without manual commits to `main`), and submits Pull Requests to **`ossf/malicious-packages`** only for confirmed `malicious` packages.
 
 ```powershell
 # Single-batch smoke test
 .\.venv\Scripts\cg.exe monitor start --once --batch-limit 10
 
-# Continuous live monitor with auto OTS upgrade, GitHub ledger push, and OpenSSF PRs
+# Continuous live monitor (auto-jumps stale checkpoints, upgrades OTS, checks ground truth, syncs live showcase)
 .\.venv\Scripts\cg.exe monitor start `
-  --min-llm-risk 40 `
-  --max-llm-rpm 10 `
-  --ots-upgrade-interval 1800 `
-  --auto-push-ledger --ledger-repo <owner>/cli-guard-ledger `
-  --auto-openssf-pr
+  --batch-limit 100 `
+  --interval 2 `
+  --workers 8 `
+  --min-llm-risk 45 `
+  --max-llm-rpm 6 `
+  --auto-push-ledger
+
+# Optional flags:
+#   --from-head                 Jump immediately to live npm HEAD on start
+#   --backfill                  Crawl historical seq backlog instead of fast-forwarding stale checkpoints
+#   --truth-check-interval 21600  Seconds between automatic flagged OSV/npm ground-truth checks (default 6h)
+
+# Hands-off daily maintenance (one-shot OTS upgrade -> ground-truth verify & auto-reveal -> live GitHub sync)
+.\.venv\Scripts\cg.exe monitor sync
+.\.venv\Scripts\cg.exe monitor sync --full
+
+# Register a user-level daily OS background task (Windows Task Scheduler / POSIX cron — no admin needed)
+.\.venv\Scripts\cg.exe monitor schedule --daily 18:00 --dry-run
+.\.venv\Scripts\cg.exe monitor schedule --daily 18:00
+.\.venv\Scripts\cg.exe monitor schedule --remove
 
 # Ledger & proof verification commands
+.\.venv\Scripts\cg.exe monitor status
 .\.venv\Scripts\cg.exe ledger list
 .\.venv\Scripts\cg.exe ledger show <finding_id>
 .\.venv\Scripts\cg.exe ledger upgrade
@@ -104,18 +120,22 @@ Copy-Item .env.example .env
 .\.venv\Scripts\cg.exe ledger verify <proof.ots> <reveal.json>
 ```
 
-> **Privacy Guarantee:** `ledger.jsonl` and `.ots` files use opaque finding IDs and salted `SHA-256(salt || canonical_json)` commitments. Private salts in `ledger_secrets/` are **never** pushed to GitHub.
+> **Privacy Guarantee:** `ledger.jsonl`, `.ots` files, and `public_snapshot.json` use opaque finding IDs and salted `SHA-256(salt || canonical_json)` commitments. Private salts in `ledger_secrets/` and unconfirmed package names are **never** pushed to GitHub.
 
 ---
 
 ## Retrospective Ground-Truth Verification
 
-Run **24h, 72h, and 7 days** after scanning live packages (OSV `MAL-*` advisories and npm `0.0.1-security` takedowns typically lag initial malware publishes by hours to days):
+Checks scanned packages against **OSV `MAL-*` advisories** (hydrating `/v1/vulns/{id}` aliases and summaries) and **official npm `0.0.1-security` takedowns**. Plain author unpublishes/404s are classified separately as `REMOVED_UNCONFIRMED` so routine developer unpublishes never trigger false public reveals or skew recall.
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\verify_ground_truth.py --auto-reveal
-# or equivalently:
+# Quick check of flagged packages (runs automatically inside `cg monitor sync`)
+.\.venv\Scripts\cg.exe monitor verify-truth --only-flagged --auto-reveal
+
+# Full check across all scanned packages (e.g. Day 7-10 benchmark)
 .\.venv\Scripts\cg.exe monitor verify-truth --auto-reveal
+# or equivalently:
+.\.venv\Scripts\python.exe scripts\verify_ground_truth.py --auto-reveal
 ```
 
 Outputs timestamped JSON and Markdown showcase reports under `~/.cli-guard/reports/` with exact lead times (`official_time - our_detected_at`), precision/recall, and Bitcoin block confirmation status.
@@ -126,11 +146,11 @@ Outputs timestamped JSON and Markdown showcase reports under `~/.cli-guard/repor
 
 The web dashboard supports two modes in a single unified UI:
 
-1. **GitHub Pages Showcase (`--public-safe` by default):**
-   Exports `docs/index.html` + `docs/snapshot.json` with **unconfirmed `SUSPICIOUS` packages automatically redacted** behind their salted SHA-256 commitments + Bitcoin `.ots` entries (matching responsible disclosure). Confirmed True Positives (`cg ledger reveal` / Day-10 ground truth) and benign clearances display in full.
+1. **GitHub Pages Showcase (`--public-safe` by default + live `cli-guard-ledger` sync):**
+   Exports `docs/index.html` + `docs/snapshot.json` with **unconfirmed `SUSPICIOUS` packages automatically redacted** behind their salted SHA-256 commitments + Bitcoin `.ots` entries. When `ledger_repo` is configured, the page automatically loads the freshest redacted `public_snapshot.json` and `ledger.jsonl` directly from `https://raw.githubusercontent.com/<owner>/cli-guard-ledger/main/` on page load—so `cg monitor sync` / `cg ledger push` updates your website automatically without committing snapshot files to `main`.
 
 ```powershell
-# Export public-safe GitHub Pages showcase (redacts unconfirmed flags)
+# Export initial/updated public-safe GitHub Pages showcase
 .\.venv\Scripts\cg.exe dashboard export --out docs --public-safe
 
 # Run live local dashboard (no redaction, interactive CLI Runner + OTS upgrade button)
@@ -145,7 +165,7 @@ The web dashboard supports two modes in a single unified UI:
 cg dashboard serve --host 0.0.0.0 --port 8080 --public-api --cors-origin https://<user>.github.io --trust-proxy
 
 # Embed the deployed API URL into GitHub Pages snapshot (or pass ?api=https://... in the browser URL)
-$env:CG_PUBLIC_API_URL = "https://your-cli-guard-api.onrender.com"
+$env:CG_PUBLIC_API_URL = "https://cli-guard.onrender.com"
 cg dashboard export --out docs --public-safe
 ```
 

@@ -285,6 +285,8 @@ class SecurityPipeline:
         spec: PackageSpec,
         *,
         use_cache: bool = True,
+        write_cache: bool = True,
+        record_scan: bool = True,
         enable_diff: bool = True,
         enable_llm: bool = True,
         force_investigate: bool = False,
@@ -362,8 +364,10 @@ class SecurityPipeline:
                 static_report=static_report,
                 extra=extra_block,
             )
-            self.cache.put(report)
-            self._record_scan_row(meta, report, scan_source)
+            if write_cache:
+                self.cache.put(report)
+            if record_scan:
+                self._record_scan_row(meta, report, scan_source)
             return report
 
         # Fast-exit benign (0 LLM calls!)
@@ -383,8 +387,10 @@ class SecurityPipeline:
                 summary="Clean static AST, metadata, and advisory check.",
                 static_report=static_report,
             )
-            self.cache.put(report)
-            self._record_scan_row(meta, report, scan_source)
+            if write_cache:
+                self.cache.put(report)
+            if record_scan:
+                self._record_scan_row(meta, report, scan_source)
             return report
 
         # Layer 2 & Layer 3: Pluggable LLM escalation (when enabled and provider configured)
@@ -478,9 +484,10 @@ class SecurityPipeline:
             verification=verification,
             extra=extra,
         )
-        if not force_investigate and not extra.get("llm_error"):
+        if write_cache and not force_investigate and not extra.get("llm_error"):
             self.cache.put(report)
-        self._record_scan_row(meta, report, scan_source)
+        if record_scan:
+            self._record_scan_row(meta, report, scan_source)
         return report
 
     def _record_scan_row(

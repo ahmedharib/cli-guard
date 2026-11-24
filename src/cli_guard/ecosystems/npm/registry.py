@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import io
 import posixpath
 import tarfile
@@ -192,6 +195,33 @@ def unpack_tarball_bytes(
     return archive
 
 
+def verify_tarball_integrity(raw: bytes, expected_integrity: str) -> None:
+    """Verify downloaded tarball bytes match npm SRI (`sha512-...`) or 40-char hex `shasum`."""
+    cleaned = expected_integrity.strip()
+    if not cleaned:
+        return
+    # Support space-separated SRI tokens (e.g. `sha512-... sha1-...`) or legacy hex sha1 shasum
+    for token in cleaned.split():
+        if "-" in token:
+            algo, b64_expected = token.split("-", 1)
+            algo_l = algo.lower()
+            if algo_l in {"sha512", "sha384", "sha256", "sha1"}:
+                digest = getattr(hashlib, algo_l)(raw).digest()
+                actual_b64 = base64.b64encode(digest).decode("ascii")
+                if not hmac.compare_digest(actual_b64, b64_expected):
+                    raise RegistryError(
+                        f"Tarball integrity mismatch ({algo_l}): expected {token}, got {algo_l}-{actual_b64}"
+                    )
+                return
+        elif len(token) == 40 and all(c in "0123456789abcdefABCDEF" for c in token):
+            actual_hex = hashlib.sha1(raw).hexdigest()
+            if not hmac.compare_digest(actual_hex.lower(), token.lower()):
+                raise RegistryError(
+                    f"Tarball shasum mismatch: expected {token}, got {actual_hex}"
+                )
+            return
+
+
 class NpmRegistryClient:
     """HTTP client for npm registry packuments and in-memory tarball downloads (with `.npmrc` support)."""
 
@@ -366,7 +396,12 @@ class NpmRegistryClient:
             deprecated=str(ver_doc["deprecated"]) if ver_doc.get("deprecated") else None,
         )
 
-    def download_tarball(self, tarball_url: str) -> InMemoryArchive:
+    def download_tarball(
+        self,
+        tarball_url: str,
+        *,
+        expected_integrity: str = "",
+    ) -> InMemoryArchive:
         if not tarball_url:
             raise RegistryError("Missing tarball URL in package metadata.")
         try:
@@ -388,6 +423,9 @@ class NpmRegistryClient:
                     raw = b"".join(chunks)
         except httpx.HTTPError as exc:
             raise RegistryError(f"HTTP error downloading tarball {tarball_url}: {exc}") from exc
+
+        if expected_integrity:
+            verify_tarball_integrity(raw, expected_integrity)
 
         return unpack_tarball_bytes(
             raw,

@@ -286,7 +286,10 @@ class NpmAdapter(EcosystemAdapter):
         return self.registry.fetch_metadata(spec)
 
     def download_archive(self, metadata: PackageMetadata) -> InMemoryArchive:
-        return self.registry.download_tarball(metadata.tarball_url)
+        return self.registry.download_tarball(
+            metadata.tarball_url,
+            expected_integrity=metadata.integrity,
+        )
 
     def scan_archive(
         self,

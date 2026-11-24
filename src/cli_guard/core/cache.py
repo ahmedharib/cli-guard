@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS monitor_state (
     value TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS osv_vulns (
+    id TEXT PRIMARY KEY,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    summary TEXT NOT NULL DEFAULT '',
+    refs_json TEXT NOT NULL DEFAULT '[]',
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -369,4 +377,52 @@ class VerdictCache:
             conn.execute(
                 "INSERT OR REPLACE INTO monitor_state (key, value, updated_at) VALUES (?, ?, ?)",
                 (key, value, time.time()),
+            )
+
+    def count_scanned_by_verdict(self, *, ecosystem: str = "npm") -> dict[str, int]:
+        """Return exact all-time counts grouped by verdict without row limits."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT verdict, COUNT(*) AS cnt FROM scanned_packages WHERE ecosystem = ? GROUP BY verdict",
+                (ecosystem,),
+            ).fetchall()
+        return {str(r["verdict"]): int(r["cnt"]) for r in rows}
+
+    def get_osv_vuln(
+        self, adv_id: str, *, ttl_seconds: float = 86400.0
+    ) -> dict[str, object] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT aliases_json, summary, refs_json, updated_at FROM osv_vulns WHERE id = ?",
+                (adv_id,),
+            ).fetchone()
+        if not row or (time.time() - float(row["updated_at"])) > ttl_seconds:
+            return None
+        return {
+            "aliases": json.loads(row["aliases_json"] or "[]"),
+            "summary": str(row["summary"] or ""),
+            "references": json.loads(row["refs_json"] or "[]"),
+        }
+
+    def put_osv_vuln(
+        self,
+        adv_id: str,
+        *,
+        aliases: list[str],
+        summary: str,
+        references: list[str],
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO osv_vulns (id, aliases_json, summary, refs_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    adv_id,
+                    json.dumps(aliases),
+                    summary[:500],
+                    json.dumps(references[:5]),
+                    time.time(),
+                ),
             )

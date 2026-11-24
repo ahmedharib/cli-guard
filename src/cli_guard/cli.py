@@ -689,7 +689,7 @@ def cmd_guard_intercept(
     manager: Annotated[str, typer.Argument(help="Package manager name (npm, npx, pnpm, yarn, bun, bunx)")],
 ) -> None:
     """Internal shim hook: inspects packages before delegating to the real package manager."""
-    settings, cache, _, adapter, pipeline = _build_runtime()
+    settings, cache, advisories, adapter, pipeline = _build_runtime()
     args = list(ctx.args)
     if args and args[0] == "--":
         args = args[1:]
@@ -705,7 +705,63 @@ def cmd_guard_intercept(
         raise typer.Exit(code=proc.returncode)
 
     parsed = parse_package_manager_command(manager, args, cwd=Path.cwd())
-    if parsed.action == "passthrough" or not parsed.specs:
+    if parsed.action == "passthrough":
+        proc = subprocess.run([real_bin, *args])
+        raise typer.Exit(code=proc.returncode)
+
+    # Fast, exact lockfile audit when running bare `npm install` / `npm ci` / `pnpm i` / `yarn`
+    if parsed.use_project_manifest:
+        lockfiles, locked_pkgs = discover_and_parse_lockfiles(Path.cwd())
+        if lockfiles and locked_pkgs:
+            err_console.print(
+                f"[cyan][cli-guard][/cyan] Auditing {len(locked_pkgs)} locked package(s) from "
+                f"{', '.join(f.name for f in lockfiles)} before `{manager}`..."
+            )
+            adv_map = advisories.query_batch([("npm", p.name, p.version) for p in locked_pkgs])
+            mal_hits: list[str] = []
+            warn_hits: list[str] = []
+            for p in locked_pkgs:
+                if cache.is_allowlisted("npm", p.name, p.version):
+                    continue
+                for adv in adv_map.get(("npm", p.name, p.version), []):
+                    if adv.is_malware:
+                        mal_hits.append(f"{p.name}@{p.version} ({adv.id}: {adv.summary or 'malware'})")
+                for w in p.warnings:
+                    warn_hits.append(f"{p.name}@{p.version}: {w}")
+
+            if mal_hits:
+                for hit in mal_hits[:10]:
+                    err_console.print(f"[bold red]  MALICIOUS:[/bold red] {hit}")
+                err_console.print(
+                    f"[bold red][cli-guard] BLOCKED `{manager}`[/bold red]: "
+                    f"{len(mal_hits)} known malicious locked package(s) detected before install."
+                )
+                raise typer.Exit(code=1)
+
+            if warn_hits:
+                for w in warn_hits[:10]:
+                    err_console.print(f"[yellow]  WARNING:[/yellow] {w}")
+                if not sys.stdin.isatty():
+                    err_console.print(
+                        "[bold yellow][cli-guard] BLOCKED (non-interactive)[/bold yellow]: "
+                        "Suspicious lockfile origin(s) detected. Set CG_BYPASS=1 to override."
+                    )
+                    raise typer.Exit(code=1)
+                proceed = typer.confirm(
+                    f"[cli-guard] {len(warn_hits)} suspicious lockfile origin(s) flagged. Proceed anyway?",
+                    default=False,
+                )
+                if not proceed:
+                    err_console.print("[yellow][cli-guard] Installation aborted by user.[/yellow]")
+                    raise typer.Exit(code=1)
+
+            err_console.print(
+                f"[green][cli-guard][/green] Verified {len(locked_pkgs)} locked package(s) clean. Proceeding with `{manager}`."
+            )
+            proc = subprocess.run([real_bin, *args])
+            raise typer.Exit(code=proc.returncode)
+
+    if not parsed.specs:
         proc = subprocess.run([real_bin, *args])
         raise typer.Exit(code=proc.returncode)
 
@@ -922,9 +978,13 @@ def cmd_monitor_start(
     max_llm_rpm: Annotated[int, typer.Option("--max-llm-rpm", help="Max Meta/LLM escalations per minute")] = 10,
     workers: Annotated[int, typer.Option("--workers", "-w", help="Concurrent worker threads for live npm scanning")] = 8,
     fresh_hours: Annotated[float, typer.Option("--fresh-hours", help="Only scan versions published within last N hours")] = 2.0,
+    from_head: Annotated[bool, typer.Option("--from-head", help="Jump directly to live npm HEAD immediately on start")] = False,
+    backfill: Annotated[bool, typer.Option("--backfill", help="Crawl historical seq backlog instead of auto-jumping stale checkpoints")] = False,
     ots_upgrade_interval: Annotated[float | None, typer.Option("--ots-upgrade-interval", help="Seconds between automatic Bitcoin OTS proof upgrades")] = None,
     no_auto_ots_upgrade: Annotated[bool, typer.Option("--no-auto-ots-upgrade", help="Disable periodic automatic Bitcoin OTS upgrades")] = False,
-    auto_push_ledger: Annotated[bool, typer.Option("--auto-push-ledger", help="Auto-push public salted commitments & .ots proofs to CG_LEDGER_REPO")] = False,
+    truth_check_interval: Annotated[float, typer.Option("--truth-check-interval", help="Seconds between scheduled flagged ground-truth checks (default 6h)")] = 21600.0,
+    no_auto_verify_truth: Annotated[bool, typer.Option("--no-auto-verify-truth", help="Disable periodic OSV/npm ground-truth checks inside monitor loop")] = False,
+    auto_push_ledger: Annotated[bool, typer.Option("--auto-push-ledger", help="Auto-push public salted commitments, .ots proofs & public_snapshot.json to CG_LEDGER_REPO")] = False,
     ledger_repo: Annotated[str | None, typer.Option("--ledger-repo", help="Public GitHub ledger repo (e.g. owner/cli-guard-ledger)")] = None,
     auto_openssf_pr: Annotated[bool, typer.Option("--auto-openssf-pr", help="Auto-open OpenSSF PR on confirmed MALICIOUS detections")] = False,
     openssf_repo: Annotated[str | None, typer.Option("--openssf-repo", help="Upstream OpenSSF repo (default ossf/malicious-packages)")] = None,
@@ -936,7 +996,7 @@ def cmd_monitor_start(
     model: Annotated[str | None, typer.Option("--model", "-m")] = None,
     env_file: Annotated[Path | None, typer.Option("--env-file")] = None,
 ) -> None:
-    """Monitor live npm package publishes, auto-upgrade Bitcoin OTS proofs, sync ledger, and open OpenSSF PRs."""
+    """Monitor live npm package publishes, auto-upgrade Bitcoin OTS proofs, verify ground truth, and sync ledger."""
     settings = Settings.from_env(provider=provider, model=model, env_file=env_file)
     if ledger_repo:
         settings.ledger_repo = ledger_repo
@@ -952,6 +1012,10 @@ def cmd_monitor_start(
         ots_upgrade_interval=ots_upgrade_interval,
         auto_push_ledger=auto_push_ledger or settings.auto_push_ledger,
         auto_openssf_pr=auto_openssf_pr or settings.auto_openssf_pr,
+        auto_verify_truth=not no_auto_verify_truth,
+        truth_check_interval=truth_check_interval,
+        from_head=from_head,
+        backfill=backfill,
         fresh_window_hours=fresh_hours,
         baseline_snapshots=baseline_snapshot or (
             [str(Path("docs/snapshot.json"))] if Path("docs/snapshot.json").is_file() else []
@@ -963,10 +1027,11 @@ def cmd_monitor_start(
             f"Feed: [cyan]replicate.npmjs.com/registry/_changes[/cyan]\n"
             f"LLM escalation: {'disabled (--no-llm)' if no_llm else f'{settings.llm_provider}:{settings.effective_triage_model} (risk >= {min_llm_risk}, max {max_llm_rpm} rpm)'}\n"
             f"Bitcoin OTS anchoring: {'disabled' if no_bitcoin else f'enabled (auto-upgrade every {int(monitor.ots_upgrade_interval)}s)'}\n"
-            f"GitHub ledger auto-push: {settings.ledger_repo if monitor.auto_push_ledger and settings.ledger_repo else 'disabled'}\n"
+            f"Auto ground-truth check: {'disabled' if no_auto_verify_truth else f'flagged every {int(monitor.truth_check_interval)}s'}\n"
+            f"GitHub ledger & showcase sync: {settings.ledger_repo if monitor.auto_push_ledger and settings.ledger_repo else 'disabled'}\n"
             f"OpenSSF auto-PR: {settings.openssf_repo if monitor.auto_openssf_pr else 'disabled'}\n"
             f"Findings dir: {monitor.ledger.findings_dir}",
-            title="cli-guard Live npm Monitor",
+            title="cli-guard Operator npm Monitor",
             expand=False,
         )
     )
@@ -983,7 +1048,7 @@ def cmd_monitor_start(
                 f"[dim]seq={stats.last_seq} | batches={stats.batches_polled} | "
                 f"scanned={stats.new_versions_scanned} (benign={stats.benign_count}, "
                 f"suspicious={stats.suspicious_count}, malicious={stats.malicious_count}) | "
-                f"llm={stats.llm_escalations} | errors={stats.errors}[/dim]"
+                f"llm={stats.llm_escalations} | skipped={stats.skipped_count} | errors={stats.errors}[/dim]"
             )
             if once:
                 break
@@ -999,18 +1064,20 @@ def cmd_monitor_status() -> None:
     cache = VerdictCache(settings.cache_db_path)
     ledger = FindingsLedgerStore(settings.data_dir)
     last_seq = cache.get_state("npm_last_seq") or "not initialized"
-    scanned = cache.list_scanned_packages(ecosystem="npm")
     entries = ledger.list_ledger_entries()
 
-    mal = sum(1 for r in scanned if r["verdict"] == VerdictLabel.MALICIOUS.value)
-    susp = sum(1 for r in scanned if r["verdict"] == VerdictLabel.SUSPICIOUS.value)
-    ben = sum(1 for r in scanned if r["verdict"] == VerdictLabel.BENIGN.value)
+    counts_map = cache.count_scanned_by_verdict(ecosystem="npm")
+    mal = counts_map.get(VerdictLabel.MALICIOUS.value, 0)
+    susp = counts_map.get(VerdictLabel.SUSPICIOUS.value, 0)
+    ben = counts_map.get(VerdictLabel.BENIGN.value, 0)
+    skipped = counts_map.get("skipped", 0)
+    total = mal + susp + ben
     confirmed_btc = sum(1 for e in entries if e.get("ots_status") == "confirmed")
 
     console.print(
         Panel(
             f"Last npm update_seq: [cyan]{last_seq}[/cyan]\n"
-            f"Total scanned packages recorded: {len(scanned)} (malicious={mal}, suspicious={susp}, benign={ben})\n"
+            f"Total scanned packages recorded: {total} (malicious={mal}, suspicious={susp}, benign={ben}, skipped={skipped})\n"
             f"Public ledger commitments: {len(entries)} (Bitcoin-confirmed OTS={confirmed_btc})\n"
             f"Ledger file: {ledger.ledger_path}",
             title="cli-guard Monitor Status",
@@ -1047,6 +1114,7 @@ def cmd_monitor_verify_truth(
             f"Early Catches (TP before official disclosure): [bold green]{counts['TRUE_POSITIVE_EARLY_CATCH']}[/]\n"
             f"Post-Disclosure Catches (TP): {counts['TRUE_POSITIVE_POST_DISCLOSURE']}\n"
             f"Pending Flags: [yellow]{counts['PENDING_FLAG']}[/]\n"
+            f"Removed / Unpublished (unconfirmed): {counts.get('REMOVED_UNCONFIRMED', 0)}\n"
             f"Likely False Positives (>7d live): {counts['LIKELY_FALSE_POSITIVE']}\n"
             f"False Negatives (Missed): [red]{counts['FALSE_NEGATIVE_MISSED']}[/]\n"
             f"True Negatives: {counts['TRUE_NEGATIVE']}\n"
@@ -1055,6 +1123,217 @@ def cmd_monitor_verify_truth(
             title="Ground-Truth Verification Showcase",
             expand=False,
         )
+    )
+
+
+def build_daily_schedule_spec(
+    *,
+    daily_time: str = "18:00",
+    task_name: str = "cli-guard-daily-sync",
+    full: bool = False,
+    remove: bool = False,
+    python_exe: Path | None = None,
+    platform_name: str | None = None,
+    working_dir: Path | None = None,
+) -> dict[str, object]:
+    """Build OS-native daily scheduler command (Windows `schtasks` or POSIX crontab line)."""
+    parts = daily_time.strip().split(":")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        raise ValueError("`--daily` must be in 24-hour HH:MM format (e.g. `18:00`).")
+    hour, minute = int(parts[0]), int(parts[1])
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError("`--daily` hour must be 00-23 and minute 00-59.")
+    hhmm = f"{hour:02d}:{minute:02d}"
+
+    py = str((python_exe or Path(sys.executable)).resolve())
+    cwd = str((working_dir or Path.cwd()).resolve())
+    sync_flags = " --full" if full else ""
+    is_windows = (platform_name or os.name) == "nt"
+
+    if is_windows:
+        if remove:
+            return {
+                "platform": "windows",
+                "action": "remove",
+                "task_name": task_name,
+                "cmd": ["schtasks", "/Delete", "/F", "/TN", task_name],
+            }
+        # Run via cmd /c cd /d <cwd> so repo `.env` is discovered reliably by the scheduled task
+        tr_cmd = f'cmd /c cd /d "{cwd}" && "{py}" -m cli_guard monitor sync{sync_flags}'
+        return {
+            "platform": "windows",
+            "action": "create",
+            "task_name": task_name,
+            "time": hhmm,
+            "cmd": [
+                "schtasks",
+                "/Create",
+                "/F",
+                "/SC",
+                "DAILY",
+                "/TN",
+                task_name,
+                "/ST",
+                hhmm,
+                "/TR",
+                tr_cmd,
+            ],
+            "task_run": tr_cmd,
+        }
+
+    cron_line = f'{minute} {hour} * * * cd "{cwd}" && "{py}" -m cli_guard monitor sync{sync_flags} # {task_name}'
+    return {
+        "platform": "posix",
+        "action": "remove" if remove else "create",
+        "task_name": task_name,
+        "time": hhmm,
+        "cron_line": cron_line,
+    }
+
+
+@monitor_app.command("sync")
+def cmd_monitor_sync(
+    full: Annotated[bool, typer.Option("--full", help="Verify all scanned packages (not just flagged) against OSV/npm")] = False,
+    repo: Annotated[str | None, typer.Option("--repo", help="Public GitHub ledger repo override")] = None,
+    no_push: Annotated[bool, typer.Option("--no-push", help="Skip pushing ledger & public_snapshot.json to GitHub")] = False,
+    json_out: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """One-shot maintenance cycle: upgrade pending Bitcoin OTS -> verify ground truth -> push live ledger & showcase."""
+    settings = Settings.from_env()
+    ledger = FindingsLedgerStore(settings.data_dir)
+
+    ots_statuses = ledger.upgrade_all_ots(verify_bitcoin_header=True)
+    ots_confirmed = sum(1 for s in ots_statuses if s.state == "confirmed")
+
+    gt = run_ground_truth_verification(
+        settings,
+        only_flagged=not full,
+        upgrade_ots=False,
+        auto_reveal=True,
+    )
+
+    push_summary: dict[str, object] = {"skipped": True, "reason": "disabled"}
+    target_repo = repo or settings.ledger_repo
+    if not no_push and target_repo and settings.github_token:
+        try:
+            sync_res = push_ledger_to_github(
+                ledger,
+                repo=target_repo,
+                token=settings.github_token,
+                auto_create=True,
+                settings=settings,
+                include_public_snapshot=True,
+            )
+            push_summary = {
+                "skipped": False,
+                "repo": sync_res.repo,
+                "uploaded": sync_res.uploaded_files,
+                "unchanged": sync_res.skipped_files,
+                "errors": sync_res.errors,
+            }
+        except GitHubSyncError as exc:
+            push_summary = {"skipped": False, "repo": target_repo, "errors": [str(exc)]}
+    elif not no_push:
+        push_summary = {
+            "skipped": True,
+            "reason": "Set GITHUB_TOKEN and CG_LEDGER_REPO to enable automatic GitHub sync.",
+        }
+
+    summary = {
+        "ots_total": len(ots_statuses),
+        "ots_confirmed": ots_confirmed,
+        "ground_truth_checked": gt["total_checked"],
+        "ground_truth_counts": gt["counts"],
+        "auto_revealed": gt["auto_revealed_finding_ids"],
+        "report_md": gt["markdown_report_path"],
+        "github_push": push_summary,
+    }
+    if json_out:
+        print(json.dumps(summary, indent=2))
+        return
+
+    counts = gt["counts"]
+    push_txt = (
+        f"{push_summary.get('repo')} (uploaded={len(push_summary.get('uploaded', []))}, "
+        f"unchanged={len(push_summary.get('unchanged', []))})"
+        if not push_summary.get("skipped")
+        else f"skipped ({push_summary.get('reason')})"
+    )
+    console.print(
+        Panel(
+            f"Bitcoin OTS proofs confirmed: [green]{ots_confirmed}/{len(ots_statuses)}[/green]\n"
+            f"Ground truth checked: [bold]{gt['total_checked']}[/bold] "
+            f"(TP={counts['TRUE_POSITIVE_EARLY_CATCH'] + counts['TRUE_POSITIVE_POST_DISCLOSURE']}, "
+            f"pending={counts['PENDING_FLAG']}, removed_unconfirmed={counts.get('REMOVED_UNCONFIRMED', 0)})\n"
+            f"Auto-revealed findings: {len(gt['auto_revealed_finding_ids'])}\n"
+            f"GitHub ledger & live showcase sync: {push_txt}\n"
+            f"Report saved: {gt['markdown_report_path']}",
+            title="cli-guard Daily Sync Complete",
+            expand=False,
+        )
+    )
+
+
+@monitor_app.command("schedule")
+def cmd_monitor_schedule(
+    daily: Annotated[str, typer.Option("--daily", help="Daily 24-hour local time HH:MM (e.g. 18:00)")] = "18:00",
+    task_name: Annotated[str, typer.Option("--task-name", help="OS scheduled task name")] = "cli-guard-daily-sync",
+    full: Annotated[bool, typer.Option("--full", help="Run full verification across all scanned packages")] = False,
+    remove: Annotated[bool, typer.Option("--remove", help="Remove the scheduled daily sync task")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run", help="Preview the OS scheduler command without modifying tasks")] = False,
+) -> None:
+    """Register (or remove) a user-level daily background task running `cg monitor sync` (no admin rights needed)."""
+    try:
+        spec = build_daily_schedule_spec(
+            daily_time=daily,
+            task_name=task_name,
+            full=full,
+            remove=remove,
+        )
+    except ValueError as exc:
+        err_console.print(f"[red]Error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    if spec["platform"] == "windows":
+        cmd = list(spec["cmd"])
+        if dry_run:
+            console.print(
+                Panel(
+                    " ".join(f'"{c}"' if " " in c else c for c in cmd),
+                    title="Windows Task Scheduler Preview (dry-run)",
+                    expand=False,
+                )
+            )
+            return
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            err_console.print(f"[red]schtasks failed:[/red] {proc.stderr or proc.stdout}")
+            raise typer.Exit(code=1)
+        if remove:
+            console.print(f"[green]Removed Windows scheduled task[/green] `{task_name}`.")
+        else:
+            console.print(
+                f"[bold green]Scheduled daily sync[/bold green] `{task_name}` at [cyan]{spec['time']}[/cyan] local time.\n"
+                f"Runs: [dim]{spec['task_run']}[/dim]"
+            )
+        return
+
+    # POSIX crontab support
+    cron_line = str(spec["cron_line"])
+    if dry_run:
+        console.print(Panel(cron_line, title="POSIX Crontab Preview (dry-run)", expand=False))
+        return
+    cur = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+    lines = [ln for ln in (cur.stdout.splitlines() if cur.returncode == 0 else []) if f"# {task_name}" not in ln]
+    if not remove:
+        lines.append(cron_line)
+    new_tab = "\n".join(lines).strip() + ("\n" if lines else "")
+    upd = subprocess.run(["crontab", "-"], input=new_tab, capture_output=True, text=True)
+    if upd.returncode != 0:
+        err_console.print(f"[red]crontab failed:[/red] {upd.stderr}")
+        raise typer.Exit(code=1)
+    console.print(
+        f"[green]{'Removed' if remove else 'Installed'} crontab entry[/green] `{task_name}` ({spec['time']})."
     )
 
 
@@ -1212,8 +1491,9 @@ def cmd_ledger_export_openssf(finding_id: Annotated[str, typer.Argument()]) -> N
 def cmd_ledger_push(
     repo: Annotated[str | None, typer.Option("--repo", help="Public GitHub ledger repo (e.g. owner/cli-guard-ledger)")] = None,
     no_create: Annotated[bool, typer.Option("--no-create", help="Fail instead of creating repo if it does not exist")] = False,
+    no_snapshot: Annotated[bool, typer.Option("--no-snapshot", help="Skip uploading redacted public_snapshot.json alongside ledger files")] = False,
 ) -> None:
-    """Push public salted commitments (`ledger.jsonl`), `.ots` proofs, and reveals to GitHub (never private salts)."""
+    """Push public salted commitments (`ledger.jsonl`), `.ots` proofs, reveals, and live `public_snapshot.json` to GitHub (never private salts)."""
     settings = Settings.from_env()
     target_repo = repo or settings.ledger_repo
     if not target_repo:
@@ -1226,6 +1506,8 @@ def cmd_ledger_push(
             repo=target_repo,
             token=settings.github_token or "",
             auto_create=not no_create,
+            settings=settings,
+            include_public_snapshot=not no_snapshot,
         )
     except GitHubSyncError as exc:
         err_console.print(f"[red]GitHub Sync Error:[/red] {exc}")

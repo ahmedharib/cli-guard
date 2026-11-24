@@ -1467,6 +1467,30 @@
       const params = new URLSearchParams(window.location.search);
       const ledgerRepo = (params.get('ledger') || snap.ledger_repo || '').trim();
       if (!ledgerRepo || !ledgerRepo.includes('/')) return snap;
+
+      // 1. Prefer live `public_snapshot.json` pushed by `cg ledger push` / `cg monitor sync`
+      //    so GitHub Pages updates automatically without manual commits to the main repo.
+      try {
+        const snapResp = await fetch(
+          `https://raw.githubusercontent.com/${ledgerRepo}/main/public_snapshot.json`,
+          { cache: 'no-store' }
+        );
+        if (snapResp.ok) {
+          const remoteSnap = await snapResp.json();
+          if (remoteSnap && typeof remoteSnap === 'object' && remoteSnap.metrics) {
+            if (!remoteSnap.public_api_url && snap.public_api_url) {
+              remoteSnap.public_api_url = snap.public_api_url;
+            }
+            if (!remoteSnap.repo_url && snap.repo_url) {
+              remoteSnap.repo_url = snap.repo_url;
+            }
+            remoteSnap.ledger_repo = remoteSnap.ledger_repo || ledgerRepo;
+            snap = remoteSnap;
+          }
+        }
+      } catch (_) {}
+
+      // 2. Also merge latest `ledger.jsonl` in case commitments/OTS upgrades are even fresher
       try {
         const resp = await fetch(`https://raw.githubusercontent.com/${ledgerRepo}/main/ledger.jsonl`, { cache: 'no-store' });
         if (!resp.ok) return snap;

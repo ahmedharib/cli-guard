@@ -50,9 +50,15 @@ def build_dashboard_snapshot(
     cache = VerdictCache(settings.cache_db_path)
     ledger = FindingsLedgerStore(settings.data_dir)
 
-    scanned = cache.list_scanned_packages(ecosystem="npm", limit=300)
+    scanned = [
+        r
+        for r in cache.list_scanned_packages(ecosystem="npm", limit=300)
+        if r.get("verdict") != "skipped"
+    ]
+    verdict_counts = cache.count_scanned_by_verdict(ecosystem="npm")
     raw_findings = ledger.list_findings()[:50]
-    ledger_entries = ledger.list_ledger_entries()[-200:]
+    all_ledger_entries = ledger.list_ledger_entries()
+    ledger_entries = all_ledger_entries[-200:]
     last_seq = cache.get_state("npm_last_seq") or ""
 
     logs: list[dict[str, Any]] = []
@@ -107,13 +113,14 @@ def build_dashboard_snapshot(
             }
         )
 
-    # Compute accurate totals from unredacted counts BEFORE redacting unconfirmed rows
-    mal = sum(1 for r in scanned if r["verdict"] == "malicious")
-    susp = sum(1 for r in scanned if r["verdict"] == "suspicious")
-    ben = sum(1 for r in scanned if r["verdict"] == "benign")
-    ots_conf = sum(1 for e in ledger_entries if e.get("ots_status") == "confirmed")
-    ots_pend = sum(1 for e in ledger_entries if e.get("ots_status") == "pending")
-    ots_err = sum(1 for e in ledger_entries if e.get("ots_status") in {"stamp_failed", "error"})
+    # Compute accurate all-time totals from SQLite (never capped by the 300-row UI slice)
+    mal = verdict_counts.get("malicious", 0)
+    susp = verdict_counts.get("suspicious", 0)
+    ben = verdict_counts.get("benign", 0)
+    total_scanned = mal + susp + ben
+    ots_conf = sum(1 for e in all_ledger_entries if e.get("ots_status") == "confirmed")
+    ots_pend = sum(1 for e in all_ledger_entries if e.get("ots_status") == "pending")
+    ots_err = sum(1 for e in all_ledger_entries if e.get("ots_status") in {"stamp_failed", "error"})
 
     if public_safe:
         redacted_scanned: list[dict[str, Any]] = []
@@ -165,11 +172,11 @@ def build_dashboard_snapshot(
         "model": settings.effective_triage_model,
         "last_seq": last_seq,
         "metrics": {
-            "total_scanned": len(scanned),
+            "total_scanned": total_scanned,
             "malicious": mal,
             "suspicious": susp,
             "benign": ben,
-            "ledger_commitments": len(ledger_entries),
+            "ledger_commitments": len(all_ledger_entries),
             "ots_confirmed": ots_conf,
             "ots_pending": ots_pend,
             "ots_errors": ots_err,

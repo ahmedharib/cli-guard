@@ -151,6 +151,7 @@ def classify_outcome(
     official_confirmed_malware: bool,
     official_confirmed_at: str | None,
     age_since_scan_hours: float | None,
+    npm_removed_unconfirmed: bool = False,
 ) -> tuple[str, float | None]:
     """Classify accuracy and compute lead time (official_time - our_time in hours)."""
     lead_hours: float | None = None
@@ -167,6 +168,10 @@ def classify_outcome(
         return "TRUE_POSITIVE_POST_DISCLOSURE", lead_hours
     if not flagged and official_confirmed_malware:
         return "FALSE_NEGATIVE_MISSED", lead_hours
+    if npm_removed_unconfirmed:
+        # Author unpublish / plain 404 without OSV MAL-* or npm 0.0.1-security holding:
+        # keep separate so routine developer unpublishes never trigger false public reveals or false recall drops.
+        return "REMOVED_UNCONFIRMED", None
     if flagged and not official_confirmed_malware:
         if age_since_scan_hours is not None and age_since_scan_hours >= 168.0:
             return "LIKELY_FALSE_POSITIVE", None
@@ -239,6 +244,7 @@ def run_ground_truth_verification(
         "TRUE_POSITIVE_EARLY_CATCH": 0,
         "TRUE_POSITIVE_POST_DISCLOSURE": 0,
         "PENDING_FLAG": 0,
+        "REMOVED_UNCONFIRMED": 0,
         "LIKELY_FALSE_POSITIVE": 0,
         "FALSE_NEGATIVE_MISSED": 0,
         "TRUE_NEGATIVE": 0,
@@ -259,11 +265,12 @@ def run_ground_truth_verification(
             timeout=min(12.0, settings.http_timeout_seconds),
         )
 
-        # Official confirmation if OSV has MAL-* OR npm removed/replaced it with security holding
-        confirmed = bool(osv_ids) or npm_st.state in {
+        # Hard confirmation requires OSV MAL-* OR official npm `0.0.1-security` holding.
+        # Plain author unpublishes / 404s stay `REMOVED_UNCONFIRMED` (never auto-revealed as malware).
+        confirmed = bool(osv_ids) or npm_st.state == "security_holding"
+        removed_unconfirmed = (not confirmed) and npm_st.state in {
             "removed_404",
             "unpublished",
-            "security_holding",
             "version_removed",
         }
 
@@ -275,7 +282,7 @@ def run_ground_truth_verification(
                 )
             if osv_time_cache[adv_id]:
                 official_times.append(str(osv_time_cache[adv_id]))
-        if npm_st.takedown_at_utc:
+        if confirmed and npm_st.takedown_at_utc:
             official_times.append(npm_st.takedown_at_utc)
         earliest_official = min(official_times) if official_times else None
 
@@ -290,6 +297,7 @@ def run_ground_truth_verification(
             official_confirmed_malware=confirmed,
             official_confirmed_at=earliest_official,
             age_since_scan_hours=age_hours,
+            npm_removed_unconfirmed=removed_unconfirmed,
         )
         summary_counts[cls_label] = summary_counts.get(cls_label, 0) + 1
 
@@ -391,6 +399,7 @@ def _render_markdown_showcase(report: dict[str, Any]) -> str:
         f"- **Early Catches (True Positive before official advisory/takedown):** {report['counts']['TRUE_POSITIVE_EARLY_CATCH']}",
         f"- **Post-Disclosure Catches:** {report['counts']['TRUE_POSITIVE_POST_DISCLOSURE']}",
         f"- **Pending Flags (awaiting OSV/npm confirmation):** {report['counts']['PENDING_FLAG']}",
+        f"- **Removed / Unpublished (unconfirmed by OSV or 0.0.1-security):** {report['counts'].get('REMOVED_UNCONFIRMED', 0)}",
         f"- **Likely False Positives (>7d live):** {report['counts']['LIKELY_FALSE_POSITIVE']}",
         f"- **Missed (False Negatives):** {report['counts']['FALSE_NEGATIVE_MISSED']}",
         f"- **True Negatives:** {report['counts']['TRUE_NEGATIVE']}",

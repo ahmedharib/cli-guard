@@ -137,8 +137,10 @@ def push_ledger_to_github(
     token: str,
     auto_create: bool = True,
     timeout: float = 25.0,
+    settings: Any | None = None,
+    include_public_snapshot: bool = True,
 ) -> LedgerSyncResult:
-    """Push ONLY public commitment ledger, `.ots` proofs, and explicitly revealed proofs to GitHub.
+    """Push ONLY public commitment ledger, `.ots` proofs, revealed proofs, and optional public-safe snapshot to GitHub.
 
     Hard safety guarantee: NEVER touches `ledger_secrets/` or unrevealed private findings.
     """
@@ -170,6 +172,22 @@ def push_ledger_to_github(
             )
         )
 
+    inline_uploads: list[tuple[str, bytes, str]] = []
+    if include_public_snapshot and settings is not None:
+        from cli_guard.dashboard.server import build_dashboard_snapshot
+
+        snap = build_dashboard_snapshot(settings, public_safe=True)
+        # Ensure remote snapshot always links back to this public ledger repo
+        if not snap.get("ledger_repo"):
+            snap["ledger_repo"] = repo
+        inline_uploads.append(
+            (
+                "public_snapshot.json",
+                json.dumps(snap, indent=2).encode("utf-8"),
+                "chore(showcase): update public-safe dashboard snapshot",
+            )
+        )
+
     headers = _gh_headers(token)
     with httpx.Client(headers=headers, timeout=timeout) as client:
         for remote_path, local_path, commit_msg in files_to_sync:
@@ -183,6 +201,22 @@ def push_ledger_to_github(
                     repo=repo,
                     path=remote_path,
                     content_bytes=local_path.read_bytes(),
+                    message=commit_msg,
+                )
+                if resp.get("unchanged"):
+                    result.skipped_files.append(remote_path)
+                else:
+                    result.uploaded_files.append(remote_path)
+            except Exception as exc:
+                result.errors.append(f"{remote_path}: {exc}")
+
+        for remote_path, payload_bytes, commit_msg in inline_uploads:
+            try:
+                resp = _put_github_file(
+                    client,
+                    repo=repo,
+                    path=remote_path,
+                    content_bytes=payload_bytes,
                     message=commit_msg,
                 )
                 if resp.get("unchanged"):

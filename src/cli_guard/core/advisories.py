@@ -76,8 +76,9 @@ class AdvisoryClient:
         # Chunk OSV batch queries (max 500 per request)
         unique_pkgs = list(dict.fromkeys(packages))
         chunk_size = 500
+        is_loopback = self.osv_api_url.startswith(("http://127.0.0.1", "http://localhost"))
         try:
-            with httpx.Client(timeout=self.timeout) as client:
+            with httpx.Client(timeout=self.timeout, trust_env=not is_loopback) as client:
                 for i in range(0, len(unique_pkgs), chunk_size):
                     chunk = unique_pkgs[i : i + chunk_size]
                     queries = [
@@ -98,6 +99,8 @@ class AdvisoryClient:
                         continue
                     data = resp.json()
                     batch_results = data.get("results", [])
+                    detail_cache: dict[str, dict[str, object]] = {}
+
                     for pkg, entry in zip(chunk, batch_results, strict=False):
                         vulns = entry.get("vulns") or []
                         for vuln in vulns:
@@ -105,17 +108,60 @@ class AdvisoryClient:
                             if not adv_id:
                                 continue
                             aliases = [str(a) for a in vuln.get("aliases", [])]
-                            is_mal = adv_id.startswith("MAL-") or any(
-                                a.startswith("MAL-") for a in aliases
-                            )
                             summary = str(vuln.get("summary", ""))
-                            if not summary and is_mal:
-                                summary = "OpenSSF Malicious Packages advisory"
                             refs = [
                                 str(r.get("url", ""))
                                 for r in vuln.get("references", [])
                                 if isinstance(r, dict) and r.get("url")
                             ]
+
+                            # OSV `/querybatch` returns minimal `{id, modified}` without aliases/summary;
+                            # hydrate matched IDs via `/vulns/{id}` (cached in SQLite) so GHSA-* malware
+                            # aliases (`MAL-*`) and summaries are never missed.
+                            if not aliases and not summary and not refs:
+                                details = detail_cache.get(adv_id)
+                                if details is None and self.cache is not None:
+                                    details = self.cache.get_osv_vuln(adv_id)
+                                if details is None:
+                                    try:
+                                        v_resp = client.get(f"{self.osv_api_url}/vulns/{adv_id}")
+                                        if v_resp.status_code == 200:
+                                            v_data = v_resp.json()
+                                            details = {
+                                                "aliases": [str(a) for a in v_data.get("aliases", [])],
+                                                "summary": str(
+                                                    v_data.get("summary")
+                                                    or (v_data.get("details") or "").splitlines()[0]
+                                                    if v_data.get("summary") or v_data.get("details")
+                                                    else ""
+                                                ),
+                                                "references": [
+                                                    str(r.get("url", ""))
+                                                    for r in v_data.get("references", [])
+                                                    if isinstance(r, dict) and r.get("url")
+                                                ][:5],
+                                            }
+                                            if self.cache is not None:
+                                                self.cache.put_osv_vuln(
+                                                    adv_id,
+                                                    aliases=list(details["aliases"]),
+                                                    summary=str(details["summary"]),
+                                                    references=list(details["references"]),
+                                                )
+                                    except httpx.HTTPError:
+                                        details = {}
+                                if details is None:
+                                    details = {}
+                                detail_cache[adv_id] = details
+                                aliases = [str(a) for a in details.get("aliases", [])]
+                                summary = str(details.get("summary", ""))
+                                refs = [str(u) for u in details.get("references", [])]
+
+                            is_mal = adv_id.startswith("MAL-") or any(
+                                a.startswith("MAL-") for a in aliases
+                            )
+                            if not summary and is_mal:
+                                summary = "OpenSSF Malicious Packages advisory"
                             results[pkg].append(
                                 AdvisoryMatch(
                                     id=adv_id,

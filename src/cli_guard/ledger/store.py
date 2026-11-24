@@ -4,18 +4,29 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from cli_guard.ledger.bitcoin_ots import (
+    BitcoinAnchorInfo,
     OTSStatus,
     inspect_ots_file,
     stamp_digest_hex,
     upgrade_ots_file,
 )
 from cli_guard.models import FinalReport
+
+_LEDGER_LOCK = threading.Lock()
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
 def canonical_json_bytes(payload: dict[str, Any]) -> bytes:
@@ -158,8 +169,9 @@ class FindingsLedgerStore:
             "ots_status": ots_status_str,
             "status": "committed",
         }
-        with self.ledger_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(public_entry) + "\n")
+        with _LEDGER_LOCK:
+            with self.ledger_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(public_entry) + "\n")
 
         return {
             "finding_id": finding_id,
@@ -185,10 +197,31 @@ class FindingsLedgerStore:
         return entries
 
     def _rewrite_ledger_entries(self, entries: list[dict[str, Any]]) -> None:
-        self.ledger_path.write_text(
+        _atomic_write_text(
+            self.ledger_path,
             "".join(json.dumps(e) + "\n" for e in entries),
-            encoding="utf-8",
         )
+
+    def _merge_and_write_ledger_updates(
+        self, updates_by_id: dict[str, dict[str, Any]]
+    ) -> None:
+        """Re-read `ledger.jsonl` under lock, merge updates by finding_id, and replace atomically.
+
+        Preserves any new findings appended concurrently while slow network OTS calls were running.
+        """
+        if not updates_by_id:
+            return
+        with _LEDGER_LOCK:
+            current = self.list_ledger_entries()
+            changed = False
+            for entry in current:
+                fid = str(entry.get("finding_id") or "")
+                patch = updates_by_id.get(fid)
+                if patch:
+                    entry.update(patch)
+                    changed = True
+            if changed:
+                self._rewrite_ledger_entries(current)
 
     def load_finding(self, finding_id: str) -> dict[str, Any] | None:
         path = self.findings_dir / f"{finding_id}.json"
@@ -211,15 +244,16 @@ class FindingsLedgerStore:
         path = self.findings_dir / f"{finding_id}.json"
         if not path.exists():
             return
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data["ground_truth"] = ground_truth
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        with _LEDGER_LOCK:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            data["ground_truth"] = ground_truth
+            _atomic_write_text(path, json.dumps(data, indent=2))
 
     def stamp_missing(self) -> list[dict[str, Any]]:
         """Stamp any committed ledger entries that do not yet have an `.ots` file."""
         entries = self.list_ledger_entries()
         results: list[dict[str, Any]] = []
-        changed = False
+        updates_by_id: dict[str, dict[str, Any]] = {}
 
         for entry in entries:
             fid = entry.get("finding_id", "")
@@ -231,44 +265,72 @@ class FindingsLedgerStore:
                 continue
             try:
                 status = stamp_digest_hex(commit_hex, ots_path)
-                entry["ots_file"] = ots_path.name
-                entry["ots_status"] = status.state
-                changed = True
+                updates_by_id[fid] = {
+                    "ots_file": ots_path.name,
+                    "ots_status": status.state,
+                }
                 results.append(
                     {"finding_id": fid, "status": status.state, "ots_path": str(ots_path)}
                 )
             except Exception as exc:
                 results.append({"finding_id": fid, "status": "error", "error": str(exc)})
 
-        if changed:
-            self._rewrite_ledger_entries(entries)
+        self._merge_and_write_ledger_updates(updates_by_id)
         return results
 
-    def upgrade_all_ots(self, *, verify_bitcoin_header: bool = True) -> list[OTSStatus]:
-        """Upgrade all pending `.ots` files to Bitcoin block attestations once mined."""
+    def upgrade_all_ots(
+        self,
+        *,
+        verify_bitcoin_header: bool = True,
+        force: bool = False,
+    ) -> list[OTSStatus]:
+        """Upgrade pending `.ots` files to Bitcoin block attestations (skipping already-confirmed ones)."""
         entries = self.list_ledger_entries()
         entry_by_id = {e.get("finding_id"): e for e in entries}
         statuses: list[OTSStatus] = []
-        ledger_dirty = False
+        updates_by_id: dict[str, dict[str, Any]] = {}
 
         for ots_path in sorted(self.ots_dir.glob("*.ots")):
             fid = ots_path.stem
+            existing = entry_by_id.get(fid) or {}
+            if (
+                not force
+                and existing.get("ots_status") == "confirmed"
+                and existing.get("bitcoin_block_height")
+            ):
+                statuses.append(
+                    OTSStatus(
+                        ots_path=ots_path,
+                        file_digest_hex=str(existing.get("commitment_sha256") or ""),
+                        state="confirmed",
+                        bitcoin_anchors=[
+                            BitcoinAnchorInfo(
+                                height=int(existing["bitcoin_block_height"]),
+                                merkle_root_hex="",
+                                block_time_utc=existing.get("bitcoin_block_time_utc"),
+                                merkle_verified=existing.get("bitcoin_merkle_verified"),
+                            )
+                        ],
+                    )
+                )
+                continue
+
             try:
                 _, status = upgrade_ots_file(
                     ots_path, verify_bitcoin_header=verify_bitcoin_header
                 )
                 statuses.append(status)
                 if fid in entry_by_id:
-                    entry = entry_by_id[fid]
-                    if entry.get("ots_status") != status.state:
-                        entry["ots_status"] = status.state
-                        ledger_dirty = True
+                    patch: dict[str, Any] = {}
+                    if existing.get("ots_status") != status.state:
+                        patch["ots_status"] = status.state
                     if status.bitcoin_anchors:
                         anchor = status.bitcoin_anchors[0]
-                        entry["bitcoin_block_height"] = anchor.height
-                        entry["bitcoin_block_time_utc"] = anchor.block_time_utc
-                        entry["bitcoin_merkle_verified"] = anchor.merkle_verified
-                        ledger_dirty = True
+                        patch["bitcoin_block_height"] = anchor.height
+                        patch["bitcoin_block_time_utc"] = anchor.block_time_utc
+                        patch["bitcoin_merkle_verified"] = anchor.merkle_verified
+                    if patch:
+                        updates_by_id[fid] = patch
             except Exception as exc:
                 statuses.append(
                     OTSStatus(
@@ -279,8 +341,7 @@ class FindingsLedgerStore:
                     )
                 )
 
-        if ledger_dirty:
-            self._rewrite_ledger_entries(entries)
+        self._merge_and_write_ledger_updates(updates_by_id)
         return statuses
 
     def reveal_finding(
@@ -337,24 +398,27 @@ class FindingsLedgerStore:
             "revealed_at_utc": datetime.now(UTC).isoformat(),
         }
         reveal_path = self.reveals_dir / f"{finding_id}.reveal.json"
-        reveal_path.write_text(json.dumps(reveal_doc, indent=2), encoding="utf-8")
+        _atomic_write_text(reveal_path, json.dumps(reveal_doc, indent=2))
 
-        # Update ledger & showcase record
-        entries = self.list_ledger_entries()
-        for e in entries:
-            if e.get("finding_id") == finding_id:
-                e["status"] = "revealed"
-                e["name"] = payload.get("name")
-                e["version"] = payload.get("version")
-                e["revealed_at_utc"] = reveal_doc["revealed_at_utc"]
-        self._rewrite_ledger_entries(entries)
+        # Update ledger & showcase record atomically without dropping concurrent appends
+        self._merge_and_write_ledger_updates(
+            {
+                finding_id: {
+                    "status": "revealed",
+                    "name": payload.get("name"),
+                    "version": payload.get("version"),
+                    "revealed_at_utc": reveal_doc["revealed_at_utc"],
+                }
+            }
+        )
 
         fpath = self.findings_dir / f"{finding_id}.json"
         if fpath.exists():
-            fdata = json.loads(fpath.read_text(encoding="utf-8"))
-            fdata["revealed"] = True
-            fdata["reveal_path"] = str(reveal_path)
-            fpath.write_text(json.dumps(fdata, indent=2), encoding="utf-8")
+            with _LEDGER_LOCK:
+                fdata = json.loads(fpath.read_text(encoding="utf-8"))
+                fdata["revealed"] = True
+                fdata["reveal_path"] = str(reveal_path)
+                _atomic_write_text(fpath, json.dumps(fdata, indent=2))
 
         return {**reveal_doc, "reveal_path": str(reveal_path)}
 

@@ -7,7 +7,7 @@ import json
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
 
@@ -23,6 +23,7 @@ from cli_guard.ledger.github_sync import push_ledger_to_github, submit_openssf_p
 from cli_guard.ledger.store import FindingsLedgerStore
 from cli_guard.llm.factory import create_provider
 from cli_guard.models import FinalReport, PackageSpec, VerdictLabel
+from cli_guard.monitor.ground_truth import run_ground_truth_verification
 from cli_guard.monitor.state_sync import hydrate_state_from_snapshot
 
 REPLICATE_BASE_URL = "https://replicate.npmjs.com"
@@ -78,6 +79,8 @@ class MonitorStats:
     ots_upgraded_count: int = 0
     ledger_pushes: int = 0
     openssf_prs_opened: int = 0
+    truth_checks_run: int = 0
+    skipped_count: int = 0
     errors: int = 0
     findings_recorded: list[dict[str, Any]] = field(default_factory=list)
 
@@ -176,6 +179,10 @@ class LiveNpmMonitor:
         ots_upgrade_interval: float | None = None,
         auto_push_ledger: bool | None = None,
         auto_openssf_pr: bool | None = None,
+        auto_verify_truth: bool = True,
+        truth_check_interval: float = 6 * 3600.0,
+        from_head: bool = False,
+        backfill: bool = False,
         fresh_window_hours: float = 2.0,
         baseline_snapshots: list[str] | None = None,
         rep_client: NpmReplicationClient | None = None,
@@ -197,10 +204,16 @@ class LiveNpmMonitor:
         self.auto_openssf_pr = (
             auto_openssf_pr if auto_openssf_pr is not None else settings.auto_openssf_pr
         )
+        self.auto_verify_truth = auto_verify_truth
+        self.truth_check_interval = max(300.0, truth_check_interval)
+        self.from_head = from_head
+        self.backfill = backfill
         self.fresh_window_hours = fresh_window_hours
         self.baseline_snapshots = list(baseline_snapshots or [])
         self._hydrated_baseline = False
+        self._checked_startup_lag = False
         self._last_ots_upgrade_ts: float = 0.0
+        self._last_truth_check_ts: float = 0.0
         self._state_lock = threading.Lock()
 
         self.cache = VerdictCache(settings.cache_db_path)
@@ -280,6 +293,52 @@ class LiveNpmMonitor:
             self._maybe_push_ledger(stats, on_event=on_event)
         return len(confirmed)
 
+    def maybe_verify_ground_truth(
+        self,
+        stats: MonitorStats,
+        *,
+        force: bool = False,
+        on_event: Callable[[str], None] | None = None,
+    ) -> dict[str, Any] | None:
+        """Periodically check flagged packages against OSV MAL-* and npm 0.0.1-security and auto-reveal confirmed TPs."""
+        if not self.auto_verify_truth:
+            return None
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_truth_check_ts > 0
+            and (now - self._last_truth_check_ts) < self.truth_check_interval
+        ):
+            return None
+        self._last_truth_check_ts = now
+
+        # Skip if no flagged findings exist yet
+        if not self.ledger.list_ledger_entries():
+            return None
+
+        try:
+            res = run_ground_truth_verification(
+                self.settings,
+                only_flagged=True,
+                upgrade_ots=False,
+                auto_reveal=True,
+            )
+            stats.truth_checks_run += 1
+            revealed = res.get("auto_revealed_finding_ids") or []
+            if revealed:
+                self._log_event(
+                    "alert",
+                    f"[bold green]Ground-truth auto-reveal:[/bold green] {len(revealed)} confirmed True Positive(s).",
+                    extra={"revealed": revealed},
+                    on_event=on_event,
+                )
+                self._maybe_push_ledger(stats, on_event=on_event)
+            return res
+        except Exception as exc:
+            stats.errors += 1
+            self._log_event("error", f"Scheduled ground-truth check failed: {exc}", on_event=on_event)
+            return None
+
     def _maybe_push_ledger(
         self,
         stats: MonitorStats,
@@ -294,6 +353,7 @@ class LiveNpmMonitor:
                 repo=self.settings.ledger_repo,
                 token=self.settings.github_token,
                 auto_create=True,
+                settings=self.settings,
             )
             if sync_res.uploaded_files:
                 stats.ledger_pushes += 1
@@ -341,31 +401,6 @@ class LiveNpmMonitor:
             stats.errors += 1
             self._log_event("error", f"OpenSSF PR submission failed: {exc}", on_event=on_event)
 
-    def _build_pipeline(self, *, allow_llm: bool) -> SecurityPipeline:
-        custom_settings = Settings(
-            data_dir=self.settings.data_dir,
-            llm_provider=self.settings.llm_provider,
-            llm_base_url=self.settings.llm_base_url,
-            llm_api_key=self.settings.llm_api_key,
-            triage_model=self.settings.triage_model,
-            investigator_model=self.settings.investigator_model,
-            cooldown_hours=self.settings.cooldown_hours,
-            fail_open=self.settings.fail_open,
-            max_investigator_turns=self.settings.max_investigator_turns,
-            npm_registry_url=self.settings.npm_registry_url,
-            osv_api_url=self.settings.osv_api_url,
-            http_timeout_seconds=self.settings.http_timeout_seconds,
-            triage_risk_threshold=self.min_llm_risk,
-            investigator_risk_threshold=max(self.min_llm_risk + 15, 55),
-        )
-        return SecurityPipeline(
-            settings=custom_settings,
-            adapter=self.adapter,
-            cache=self.cache,
-            advisories=self.advisories,
-            llm_provider=self.llm_provider if allow_llm else None,
-        )
-
     def _process_package_change(
         self,
         pkg_name: str,
@@ -386,19 +421,8 @@ class LiveNpmMonitor:
             max_extracted_files=self.settings.max_extracted_files,
         )
         worker_adapter = NpmAdapter(self.settings, registry=worker_registry)
-        custom_settings = Settings(
-            data_dir=self.settings.data_dir,
-            llm_provider=self.settings.llm_provider,
-            llm_base_url=self.settings.llm_base_url,
-            llm_api_key=self.settings.llm_api_key,
-            triage_model=self.settings.triage_model,
-            investigator_model=self.settings.investigator_model,
-            cooldown_hours=self.settings.cooldown_hours,
-            fail_open=self.settings.fail_open,
-            max_investigator_turns=self.settings.max_investigator_turns,
-            npm_registry_url=self.settings.npm_registry_url,
-            osv_api_url=self.settings.osv_api_url,
-            http_timeout_seconds=self.settings.http_timeout_seconds,
+        custom_settings = replace(
+            self.settings,
             triage_risk_threshold=self.min_llm_risk,
             investigator_risk_threshold=max(self.min_llm_risk + 15, 55),
         )
@@ -435,35 +459,47 @@ class LiveNpmMonitor:
                 continue
             spec = PackageSpec(ecosystem="npm", name=pkg_name, version=ver, raw_spec=f"{pkg_name}@{ver}")
             try:
+                # Run Layer 0 + Layer 1 without prematurely caching static-only results
                 report = static_pipe.evaluate(
                     spec,
                     use_cache=True,
+                    write_cache=False,
+                    record_scan=False,
                     enable_diff=True,
                     enable_llm=False,
                     scan_source="monitor",
                 )
 
-                if (
+                needs_llm = (
                     enable_llm
                     and self.llm_provider is not None
                     and not (report.static_report and report.static_report.deterministic_block)
                     and report.risk_score >= self.min_llm_risk
-                ):
+                )
+                rate_limited_llm = False
+                if needs_llm:
                     if self.llm_limiter.allow():
                         with self._state_lock:
                             stats.llm_escalations += 1
                         report = llm_pipe.evaluate(
                             spec,
                             use_cache=False,
+                            write_cache=True,
+                            record_scan=False,
                             enable_diff=True,
                             enable_llm=True,
                             scan_source="monitor",
                         )
                     else:
+                        rate_limited_llm = True
                         with self._state_lock:
                             stats.llm_skipped_rate_limit += 1
+                elif not report.from_cache:
+                    # Final deterministic/benign verdict (no pending LLM escalation): safe to cache
+                    self.cache.put(report)
 
                 pkg_reports.append(report)
+                finding_id = ""
                 with self._state_lock:
                     stats.new_versions_scanned += 1
                     if report.verdict == VerdictLabel.MALICIOUS:
@@ -479,9 +515,10 @@ class LiveNpmMonitor:
                             scan_source="monitor",
                             stamp_bitcoin=self.stamp_bitcoin,
                         )
+                        finding_id = saved["finding_id"]
                         stats.findings_recorded.append(
                             {
-                                "finding_id": saved["finding_id"],
+                                "finding_id": finding_id,
                                 "package": f"{report.name}@{report.version}",
                                 "verdict": report.verdict.value,
                                 "risk_score": report.risk_score,
@@ -489,31 +526,14 @@ class LiveNpmMonitor:
                                 "ots_status": saved["ots_status"],
                             }
                         )
-                        self.cache.record_scan(
-                            ecosystem=report.ecosystem,
-                            name=report.name,
-                            version=report.version,
-                            integrity=report.integrity,
-                            published_at=(
-                                report.static_report.metadata.published_at.isoformat()
-                                if report.static_report and report.static_report.metadata.published_at
-                                else ""
-                            ),
-                            scanned_at=datetime.now(UTC).isoformat(),
-                            scan_source="monitor",
-                            verdict=report.verdict.value,
-                            risk_score=report.risk_score,
-                            layers_run=report.layers_run,
-                            summary=report.summary,
-                            finding_id=saved["finding_id"],
-                        )
                         self._log_event(
                             "alert" if report.verdict == VerdictLabel.MALICIOUS else "warning",
                             f"FLAGGED {report.verdict.value.upper()} "
-                            f"{report.name}@{report.version} (risk={report.risk_score}) -> "
+                            f"{report.name}@{report.version} (risk={report.risk_score}"
+                            f"{', static-only: RPM cap' if rate_limited_llm else ''}) -> "
                             f"commit={saved['commitment_sha256'][:12]}... ots={saved['ots_status']}",
                             extra={
-                                "finding_id": saved["finding_id"],
+                                "finding_id": finding_id,
                                 "package": f"{report.name}@{report.version}",
                                 "verdict": report.verdict.value,
                                 "risk_score": report.risk_score,
@@ -523,8 +543,49 @@ class LiveNpmMonitor:
                         )
                         self._maybe_push_ledger(stats, on_event=on_event)
                         self._maybe_submit_openssf_pr(
-                            saved["finding_id"], report, stats, on_event=on_event
+                            finding_id, report, stats, on_event=on_event
                         )
+
+                    self.cache.record_scan(
+                        ecosystem=report.ecosystem,
+                        name=report.name,
+                        version=report.version,
+                        integrity=report.integrity,
+                        published_at=(
+                            report.static_report.metadata.published_at.isoformat()
+                            if report.static_report and report.static_report.metadata.published_at
+                            else ""
+                        ),
+                        scanned_at=datetime.now(UTC).isoformat(),
+                        scan_source="monitor",
+                        verdict=report.verdict.value,
+                        risk_score=report.risk_score,
+                        layers_run=report.layers_run,
+                        summary=report.summary,
+                        finding_id=finding_id,
+                    )
+            except RegistryError as exc:
+                # Oversized tarballs (>5000 files / >100MiB) or 404 races: mark skipped so repeat edits don't re-download
+                with self._state_lock:
+                    stats.skipped_count += 1
+                    self.cache.record_scan(
+                        ecosystem="npm",
+                        name=pkg_name,
+                        version=ver,
+                        integrity="",
+                        published_at="",
+                        scanned_at=datetime.now(UTC).isoformat(),
+                        scan_source="monitor",
+                        verdict="skipped",
+                        risk_score=0,
+                        layers_run=[],
+                        summary=str(exc)[:300],
+                    )
+                    self._log_event(
+                        "info",
+                        f"[dim]Skipped {pkg_name}@{ver}: {exc}[/dim]",
+                        on_event=on_event,
+                    )
             except Exception as exc:
                 with self._state_lock:
                     stats.errors += 1
@@ -560,14 +621,42 @@ class LiveNpmMonitor:
 
         seq = self.cache.get_state("npm_last_seq")
         if not seq:
-            seq = self.rep_client.fetch_head_seq()
+            head = self.rep_client.fetch_head_seq()
+            try:
+                head_int = int(head)
+                # Start slightly behind live HEAD so Batch 1 immediately scans fresh packages
+                seq = str(max(0, head_int - min(500, batch_limit * 5))) if head_int > 1000 else head
+            except ValueError:
+                seq = head
             self.cache.set_state("npm_last_seq", seq)
             stats.last_seq = seq
+            self._checked_startup_lag = True
             self._log_event(
                 "info",
                 f"Initialized live npm checkpoint at update_seq={seq}",
                 on_event=on_event,
             )
+        elif not self._checked_startup_lag:
+            self._checked_startup_lag = True
+            if self.from_head or (not self.backfill and self.fresh_window_hours <= 6.0):
+                try:
+                    head_str = self.rep_client.fetch_head_seq()
+                    head_int = int(head_str)
+                    seq_int = int(seq)
+                    lag = head_int - seq_int
+                    if self.from_head or lag > 10_000:
+                        target_seq = str(max(seq_int, head_int - min(500, batch_limit * 5)))
+                        if target_seq != seq:
+                            self.cache.set_state("npm_last_seq", target_seq)
+                            self._log_event(
+                                "info",
+                                f"Fast-forwarded stale checkpoint from seq={seq} to live seq={target_seq} "
+                                f"(was {lag:,} changes behind HEAD={head_int}; pass --backfill to crawl old history).",
+                                on_event=on_event,
+                            )
+                            seq = target_seq
+                except Exception:
+                    pass
 
         new_seq, pkg_names = self.rep_client.fetch_changes(since=seq, limit=batch_limit)
         stats.batches_polled += 1
@@ -607,6 +696,7 @@ class LiveNpmMonitor:
             self.cache.set_state("npm_last_seq", new_seq)
             stats.last_seq = new_seq
 
-        # Periodically upgrade pending Bitcoin `.ots` proofs automatically
+        # Periodically upgrade pending Bitcoin `.ots` proofs and run flagged ground-truth checks
         self.maybe_upgrade_ots_and_sync(stats, on_event=on_event)
+        self.maybe_verify_ground_truth(stats, on_event=on_event)
         return reports
